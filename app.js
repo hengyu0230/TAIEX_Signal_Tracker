@@ -56,7 +56,7 @@
     var vs = pts.map(function (p) { return p.v; });
     if (n(opt.base) != null) vs.push(n(opt.base));
     var lo = Math.min.apply(null, vs), hi = Math.max.apply(null, vs), sp = (hi - lo) || Math.abs(hi) * .01 || 1; lo -= sp * .08; hi += sp * .08;
-    function X(i) { return pl + (W - pl - pr) * i / (pts.length - 1); } function Y(v) { return pt + (hi - v) / (hi - lo) * (H - pt - pb); }
+    function X(i) { return pl + 8 + (W - pl - pr - 16) * i / (pts.length - 1); } function Y(v) { return pt + (hi - v) / (hi - lo) * (H - pt - pb); }
     var s = '<svg viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="' + esc(opt.label || "走勢圖") + '">';
     for (var g = 0; g <= 3; g++) { var v = lo + (hi - lo) * g / 3, y = Y(v); s += '<line x1="' + pl + '" x2="' + (W - pr) + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '" class="grid"/><text x="' + (pl - 6) + '" y="' + (y + 4).toFixed(1) + '" text-anchor="end" class="ax">' + fmt(v, opt.dp || 0) + "</text>"; }
     if (n(opt.base) != null) { var by = Y(n(opt.base)); s += '<line x1="' + pl + '" x2="' + (W - pr) + '" y1="' + by.toFixed(1) + '" y2="' + by.toFixed(1) + '" class="base"/><text x="' + (W - pr) + '" y="' + (by - 4).toFixed(1) + '" text-anchor="end" class="ax">' + esc(opt.baseLabel || "") + "</text>"; }
@@ -65,9 +65,18 @@
     if (!c) c = (n(opt.base) != null ? pts[pts.length - 1].v >= n(opt.base) : pts[pts.length - 1].v >= pts[0].v) ? "l-up" : "l-down";
     s += '<polyline points="' + line + '" class="' + c + '"/>';
     var lab = opt.xlab || function (p) { return p.t || (p.d ? String(p.d).slice(5) : ""); };
-    var mid = Math.floor((pts.length - 1) / 2);
-    s += '<text x="' + pl + '" y="' + (H - 4) + '" class="ax">' + esc(lab(pts[0])) + '</text><text x="' + X(mid).toFixed(1) + '" y="' + (H - 4) + '" text-anchor="middle" class="ax">' + esc(lab(pts[mid])) + '</text><text x="' + (W - pr) + '" y="' + (H - 4) + '" text-anchor="end" class="ax">' + esc(lab(pts[pts.length - 1])) + "</text></svg>";
-    return s;
+    if (pts.length <= 8) {
+      // 資料點少（例如本週）：每一點都標示日期，並以圓點表示
+      pts.forEach(function (p, i) {
+        var x = X(i), anchor = i === 0 ? "start" : i === pts.length - 1 ? "end" : "middle";
+        s += '<circle cx="' + x.toFixed(1) + '" cy="' + Y(p.v).toFixed(1) + '" r="3" class="dot-' + (c === "l-down" ? "down" : c === "l-up" ? "up" : "acc") + '"><title>' + esc(lab(p)) + "　" + fmt(p.v, opt.dp || 2) + "</title></circle>";
+        s += '<text x="' + x.toFixed(1) + '" y="' + (H - 4) + '" text-anchor="' + anchor + '" class="ax">' + esc(lab(p)) + "</text>";
+      });
+    } else {
+      var mid = Math.floor((pts.length - 1) / 2);
+      s += '<text x="' + pl + '" y="' + (H - 4) + '" class="ax">' + esc(lab(pts[0])) + '</text><text x="' + X(mid).toFixed(1) + '" y="' + (H - 4) + '" text-anchor="middle" class="ax">' + esc(lab(pts[mid])) + '</text><text x="' + (W - pr) + '" y="' + (H - 4) + '" text-anchor="end" class="ax">' + esc(lab(pts[pts.length - 1])) + "</text>";
+    }
+    return s + "</svg>";
   }
 
   // 期間切換按鈕
@@ -134,14 +143,20 @@
     var m20 = (tw.ma20 || [])[tw.ma20.length - 1], m120 = (tw.ma120 || [])[tw.ma120.length - 1], c = n(tw.last && tw.last.c), f = d.taifex;
     function rel(m) { m = n(m); return m && c ? (c >= m ? "高於 " : "低於 ") + Math.abs((c / m - 1) * 100).toFixed(1) + "%" : "資料不足"; }
     return '<div class="stat"><span class="big num">' + fmt(c, 2) + '</span><span class="chg ' + cls(tw.change) + '">' + pct(tw.change) + "</span></div>" +
-      '<div class="kv"><div><b class="num">' + fmt(m20) + "</b><small>月線，收盤" + rel(m20) + '</small></div><div><b class="num">' + fmt(m120) + "</b><small>半年線，收盤" + rel(m120) + '</small></div><div><b class="num">' + (f ? fmt(f.last) : "—") + "</b><small>台指期" + (f && c ? "，價差 " + sgn(n(f.last) - c, 0) : "") + "</small></div></div>";
+      '<div class="kv"><div><b class="num">' + fmt(m20) + "</b><small>月線，收盤" + rel(m20) + '</small></div><div><b class="num">' + fmt(m120) + "</b><small>半年線，收盤" + rel(m120) + '</small></div><div><b class="num">' + (f ? fmt(f.last) : "—") + "</b><small>台指期日盤" + (f && c ? "，價差 " + sgn(n(f.last) - c, 0) : "") + "</small></div></div>";
+  }
+
+  function nightHtml(d) {
+    var f = d.taifex;
+    if (!f || !f.night) return "";
+    return '<div class="night"><span class="muted">台指期夜盤（' + esc(f.night.date || "") + '，15:00 至次日 05:00）</span><b class="num">' + fmt(f.night.last) + '</b><span class="num ' + cls(f.night.change) + '">' + sgn(f.night.change) + "（" + pct(f.night.changePct) + '）</span><span class="muted num">成交 ' + fmt(f.night.volume) + " 口</span></div>";
   }
 
   function intradayHtml(it, name) {
     if (!it || !it.points || it.points.length < 2) return '<p class="empty">今日盤中走勢資料未取得。</p>';
     var last = it.points[it.points.length - 1].v, base = n(it.prevClose);
     var chg = base ? last / base - 1 : null;
-    return '<p class="muted" style="margin:0 0 6px;font-size:12px">' + esc(it.date || "") + "　" + esc(name) + " 盤中，虛線為前一交易日收盤" + (base ? " " + fmt(base, 2) : "") + (chg != null ? '，收盤 <span class="' + cls(chg) + '">' + pct(chg) + "</span>" : "") + "</p>" +
+    return '<p class="muted" style="margin:0 0 6px;font-size:12px">' + esc(it.date || "") + "　" + esc(name) + (it.live ? " 盤中（約每 10 分鐘更新）" : " 盤中") + "，虛線為前一交易日收盤" + (base ? " " + fmt(base, 2) : "") + (chg != null ? '，收盤 <span class="' + cls(chg) + '">' + pct(chg) + "</span>" : "") + "</p>" +
       lineChart(it.points.map(function (p) { return { t: p.t, v: p.v }; }), { h: 190, base: base, baseLabel: "前收", label: name + "今日走勢" });
   }
 
@@ -184,15 +199,22 @@
 
   function jpIndexHtml(d) {
     var j = d.jp; if (!j) return '<p class="empty">日股資料未取得。</p>';
-    var r = UI.jpRange, chart;
-    if (r === "d") chart = intradayHtml(j.intraday, "日經 225");
+    var r = UI.jpRange, chart, jb0 = j.index.bars || [];
+    var jchg = n(j.index.change);
+    if (jchg == null && jb0.length > 1) jchg = n(jb0[jb0.length - 1].c) / n(jb0[jb0.length - 2].c) - 1;
+    if (r === "d" && j.intraday && j.intraday.points && j.intraday.points.length > 1) chart = intradayHtml(j.intraday, "日經 225");
+    else if (r === "d") {
+      var wk = inRange(jb0, "w");
+      chart = '<p class="muted" style="margin:0 0 6px;font-size:12px">日經今日盤中資料目前無法取得（來源限制），以下改顯示本週走勢。</p>' +
+        lineChart(wk.map(function (x) { return { date: x.date, v: x.c }; }), { h: 190, label: "日經 225 本週走勢", empty: "此期間資料不足。" });
+    }
     else {
       var b = inRange(j.index.bars || [], r);
       var chg = b.length > 1 ? n(b[b.length - 1].c) / n(b[0].c) - 1 : null;
       chart = '<p class="muted" style="margin:0 0 6px;font-size:12px">' + (b.length ? esc(b[0].date) + " 至 " + esc(b[b.length - 1].date) : "") + (chg != null ? '，區間漲跌 <span class="' + cls(chg) + '">' + pct(chg) + "</span>" : "") + "</p>" +
         lineChart(b.map(function (x) { return { date: x.date, v: x.c }; }), { h: 190, label: "日經 225 走勢", empty: "此期間資料不足。" });
     }
-    return '<div class="stat"><span class="big num">' + fmt(j.index.last, 2) + '</span><span class="chg ' + cls(j.index.change) + '">' + pct(j.index.change) + '</span><span class="muted">日經 225｜' + md(j.index.date) + "</span></div>" +
+    return '<div class="stat"><span class="big num">' + fmt(j.index.last, 2) + '</span><span class="chg ' + cls(jchg) + '">' + pct(jchg) + '</span><span class="muted">日經 225｜' + md(j.index.date) + (j.src === "FRED" ? "（FRED，約延遲 1 個交易日）" : "") + "</span></div>" +
       '<div class="kv"><div><b class="num">' + fmt(j.usdjpy && j.usdjpy.last, 2) + '</b><small>美元兌日圓</small></div><div><b class="num ' + cls(j.usdjpy && j.usdjpy.change) + '">' + pct(j.usdjpy && j.usdjpy.change) + '</b><small>日圓匯率變動</small></div><div><b class="num">' + esc(j.src || "—") + "</b><small>資料來源</small></div></div>" + chart;
   }
 
@@ -246,7 +268,7 @@
     h += '<div class="cols even">';
     h += "<section>" +
       '<div class="blk">' + head("指示訊號", "點選燈號查看說明") + lampsHtml(d, "desk") + "</div>" +
-      '<div class="blk">' + head("加權指數｜今日走勢", (d.tw && d.tw.intraday ? d.tw.intraday.src : (d.tw && d.tw.src) || "")) + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數") + "</div>" +
+      '<div class="blk">' + head("加權指數｜今日走勢", (d.tw && d.tw.intraday ? d.tw.intraday.src : (d.tw && d.tw.src) || "")) + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數") + nightHtml(d) + "</div>" +
       '<div class="blk">' + head("外資買賣超（億元）", "近 " + ((d.foreign || []).length) + " 個交易日") + barChart(d.foreign) + "</div>" +
       "</section>";
     h += "<section>" +
@@ -283,7 +305,7 @@
     var tt = d.twTop || {};
     if (UI.tab === "tw") {
       h += '<div class="blk">' + head("止跌訊號", "點選燈號查看說明") + lampsHtml(d, "mob") + "</div>";
-      h += '<div class="blk">' + head("加權指數｜今日走勢", d.asOf || "") + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數") + "</div>";
+      h += '<div class="blk">' + head("加權指數｜今日走勢", d.asOf || "") + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數") + nightHtml(d) + "</div>";
       h += '<div class="blk">' + head("加權指數｜近 3 個月", "K 線與均線") + k3mHtml(d) + "</div>";
       h += '<div class="blk">' + head("外資買賣超（億元）") + barChart(d.foreign) + "</div>";
       h += '<div class="blk">' + head("今日熱門股", "依" + (tt.basis || "成交金額") + "排序") + topTable(tt.items, { valueLabel: tt.basis === "成交金額" ? "成交值（億）" : "成交量（張）", value: function (x) { return fmt(x.value, tt.basis === "成交金額" ? 1 : 0); } }) + "</div>";
