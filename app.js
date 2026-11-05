@@ -170,6 +170,15 @@
     }).join("") + "</tbody></table>";
   }
 
+  function usNote(d) {
+    var f = (d.us || []).some(function (u) { return u.src === "FRED"; });
+    return f ? "部分資料來自 FRED，可能延遲 1 個交易日" : "前一交易日收盤";
+  }
+  function fxNote(d) {
+    var f = d.fx; if (!f) return "";
+    return "資料日期 " + (f.usdtwd && f.usdtwd.date ? f.usdtwd.date.slice(5) : "—") + (f.src ? "｜" + f.src : "");
+  }
+
   function legalHtml(d) {
     return '<div class="legal"><h2>重要聲明與風險警語</h2><ol>' +
       "<li>本網站所載資訊僅供一般參考，不構成任何投資建議、要約或招攬，亦不代表對任何金融商品之推薦。</li>" +
@@ -179,7 +188,7 @@
       "<li>本網站資料取自公開來源並經程式自動整理，可能有延遲、遺漏或錯誤；實際數據以各資料來源之官方公告為準。</li>" +
       "<li>新聞標題與連結之著作權屬原刊登媒體所有，本網站僅提供索引，內容以原始報導為準。</li>" +
       "<li>本網站與下列資料來源機構無任何關聯，亦未獲其授權或背書。使用本網站即表示您已閱讀並同意上述聲明。</li>" +
-      '</ol><div class="src">資料來源：臺灣證券交易所、臺灣期貨交易所、Yahoo Finance、Google 新聞。資料更新時間 ' + esc(time(d && d.updatedAt)) + "。</div></div>";
+      '</ol><div class="src">資料來源：臺灣證券交易所、臺灣期貨交易所、Yahoo Finance、美國聯準會經濟資料庫（FRED）、Google 新聞。本網站資料為收盤後整理，並非即時報價。資料更新時間 ' + esc(time(d && d.updatedAt)) + "。</div></div>";
   }
 
   /* ---------- 電腦版 ---------- */
@@ -190,7 +199,7 @@
     h += '<div class="cols">';
     h += "<section>" +
       '<div class="blk">' + head("指示訊號", "點選燈號查看說明") + lampsHtml(d, "desk") + "</div>" +
-      '<div class="blk">' + head("加權指數", "資料日期 " + (d.asOf || "—")) + twIndexHtml(d, 230) + "</div>" +
+      '<div class="blk">' + head("加權指數", "收盤資料 " + (d.asOf || "—") + (d.tw && d.tw.src ? "｜" + d.tw.src : "")) + twIndexHtml(d, 230) + "</div>" +
       '<div class="blk">' + head("外資買賣超（億元）", "近 " + ((d.foreign || []).length) + " 個交易日") + barChart(d.foreign) + "</div>" +
       "</section>";
     h += "<section>" +
@@ -200,17 +209,17 @@
       "</section></div>";
     h += '<hr class="dash">';
     h += '<div class="cols even"><section>' +
-      '<div class="blk">' + head("美股", "前一交易日收盤") + usIndexTable(d) + "</div>" +
+      '<div class="blk">' + head("美股", usNote(d)) + usIndexTable(d) + "</div>" +
       '<div class="blk">' + head("美股熱門股", "主要大型股中依成交金額排序") + topTable(d.usTop, { valueLabel: "成交額（億美元）", value: function (x) { return fmt(n(x.value) / 1e8, 1); } }) + "</div>" +
       '<div class="blk">' + head("美國財經新聞") + newsHtml(d.news && d.news.us, 4) + "</div>" +
       "</section><section>" +
-      '<div class="blk">' + head("日股") + jpIndexHtml(d) + "</div>" +
+      '<div class="blk">' + head("日股", d.jp && d.jp.src ? "來源 " + d.jp.src : "") + jpIndexHtml(d) + "</div>" +
       '<div class="blk">' + head("日股熱門股", "主要大型股中依成交金額排序") + topTable(d.jpTop, { valueLabel: "成交額（億日圓）", value: function (x) { return fmt(n(x.value) / 1e8, 0); } }) + "</div>" +
       '<div class="blk">' + head("日本財經新聞") + newsHtml(d.news && d.news.jp, 4) + "</div>" +
       "</section></div>";
     h += '<hr class="dash">';
     h += '<section><div class="fx-grid">' +
-      "<div>" + head("新台幣兌美元匯率", "近 120 個交易日") + (fx.rate || fx) + "</div>" +
+      "<div>" + head("新台幣兌美元匯率", fxNote(d)) + (fx.rate || fx) + "</div>" +
       "<div>" + head("匯率波動度", "20 日年化歷史波動率") + (fx.vol || "") + "</div>" +
       "<div>" + head("其他主要匯率") + fxOthers(d) + '<div class="blk" style="margin-top:16px">' + head("匯率新聞") + newsHtml(d.news && d.news.fx, 3) + "</div></div>" +
       "</div></section>";
@@ -233,16 +242,16 @@
       h += '<div class="blk">' + head("今日熱門股", "依" + (tt.basis || "成交金額") + "排序") + topTable(tt.items, { valueLabel: tt.basis === "成交金額" ? "成交值（億）" : "成交量（張）", value: function (x) { return fmt(x.value, tt.basis === "成交金額" ? 1 : 0); } }) + "</div>";
       h += '<div class="blk">' + head("新聞") + newsHtml(d.news && d.news.tw, 8) + "</div>";
     } else if (UI.tab === "us") {
-      h += '<div class="blk">' + head("美股指數", "前一交易日收盤") + usIndexTable(d) + "</div>";
+      h += '<div class="blk">' + head("美股指數", usNote(d)) + usIndexTable(d) + "</div>";
       h += '<div class="blk">' + head("今日熱門股", "主要大型股中依成交金額排序") + topTable(d.usTop, { valueLabel: "成交額（億美元）", value: function (x) { return fmt(n(x.value) / 1e8, 1); } }) + "</div>";
       h += '<div class="blk">' + head("新聞") + newsHtml(d.news && d.news.us, 8) + "</div>";
     } else if (UI.tab === "jp") {
-      h += '<div class="blk">' + head("日股指數") + jpIndexHtml(d) + "</div>";
+      h += '<div class="blk">' + head("日股指數", d.jp && d.jp.src ? "來源 " + d.jp.src : "") + jpIndexHtml(d) + "</div>";
       h += '<div class="blk">' + head("今日熱門股", "主要大型股中依成交金額排序") + topTable(d.jpTop, { valueLabel: "成交額（億日圓）", value: function (x) { return fmt(n(x.value) / 1e8, 0); } }) + "</div>";
       h += '<div class="blk">' + head("新聞") + newsHtml(d.news && d.news.jp, 8) + "</div>";
     } else {
       var fx = fxMain(d, true);
-      h += '<div class="blk">' + head("新台幣兌美元") + (fx.rate || fx) + "</div>";
+      h += '<div class="blk">' + head("新台幣兌美元", fxNote(d)) + (fx.rate || fx) + "</div>";
       h += '<div class="blk">' + head("匯率波動度", "20 日年化歷史波動率") + (fx.vol || "") + "</div>";
       h += '<div class="blk">' + head("其他主要匯率") + fxOthers(d) + "</div>";
       h += '<div class="blk">' + head("新聞") + newsHtml(d.news && d.news.fx, 8) + "</div>";
