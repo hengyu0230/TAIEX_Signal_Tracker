@@ -184,10 +184,23 @@
     }).join("") + "</ul>";
   }
 
-  function usIndexTable(d) {
+  function usCard(u) {
+    if (!u) return "";
+    var pctMode = u.unit === "%";
+    return '<div class="ucard"><div class="h"><h2>' + esc(u.name) + "</h2><span>" + (u.date ? esc(String(u.date).slice(5)) : "") + (u.src ? "｜" + esc(u.src) : "") + "</span></div>" +
+      '<div class="stat"><span class="big num">' + fmt(u.last, 2) + (pctMode ? "%" : "") + '</span><span class="chg ' + cls(u.change) + '">' + (pctMode ? sgn(u.diff, 2) + " 點" : pct(u.change)) + "</span></div>" +
+      lineChart((u.bars || []).map(function (b) { return { date: b.date, v: b.c }; }), { h: 130, dp: 0, label: u.name + "近一月走勢", empty: "資料未取得。" }) + "</div>";
+  }
+  function usCardsHtml(d) {
+    var us = d.us || [];
+    var pick = function (sym) { return us.filter(function (u) { return u.sym === sym; })[0]; };
+    return '<div class="ucards">' + usCard(pick("^GSPC")) + usCard(pick("^SOX")) + "</div>";
+  }
+  function usIndexTable(d, skip) {
     if (!d.us || !d.us.length) return '<p class="empty">美股資料未取得。</p>';
     var s = '<table class="t"><thead><tr><th>指數</th><th>最新</th><th>漲跌</th><th>近一月</th></tr></thead><tbody>';
     d.us.forEach(function (u) {
+      if (skip && skip.indexOf(u.sym) >= 0) return;
       var pctMode = u.unit === "%";
       s += "<tr><td>" + esc(u.name) + '</td><td class="num">' + fmt(u.last, 2) + (pctMode ? "%" : "") + '</td><td class="num ' + cls(u.change) + '">' + (pctMode ? sgn(u.diff, 2) + " 點" : pct(u.change)) + "</td><td>" + spark(u.bars) + "</td></tr>";
     });
@@ -264,7 +277,7 @@
   function renderDesk(d) {
     var tt = d.twTop || {};
     var fx = fxMain(d, false);
-    var h = "";
+    var h = '<div class="region">台股</div>';
     h += '<div class="cols even">';
     h += "<section>" +
       '<div class="blk">' + head("指示訊號", "點選燈號查看說明") + lampsHtml(d, "desk") + "</div>" +
@@ -278,16 +291,19 @@
       "</section></div>";
     h += '<hr class="dash">';
     h += '<div class="cols even"><section>' +
-      '<div class="blk">' + head("美股", usNote(d)) + usIndexTable(d) + "</div>" +
-      '<div class="blk">' + head("美股熱門股", "主要大型股中依成交金額排序") + topTable(d.usTop, { valueLabel: "成交額（億美元）", value: function (x) { return fmt(n(x.value) / 1e8, 1); } }) + "</div>" +
+      '<div class="region">美股</div>' +
+      '<div class="blk">' + usCardsHtml(d) + "</div>" +
+      '<div class="blk">' + head("美股重點股", "主要大型股，依成交金額排序") + topTable(d.usTop, { valueLabel: "成交額（億美元）", value: function (x) { return fmt(n(x.value) / 1e8, 1); } }) + "</div>" +
+      '<div class="blk">' + head("其他指標", usNote(d)) + usIndexTable(d, ["^GSPC", "^SOX"]) + "</div>" +
       '<div class="blk">' + head("美國財經新聞") + newsHtml(d.news && d.news.us, 4) + "</div>" +
       "</section><section>" +
-      '<div class="blk">' + headR("日股", rangeSeg("jp", JP_RANGES, UI.jpRange)) + jpIndexHtml(d) + "</div>" +
+      '<div class="region-row"><div class="region">日股</div>' + rangeSeg("jp", JP_RANGES, UI.jpRange) + "</div>" +
+      '<div class="blk">' + jpIndexHtml(d) + "</div>" +
       '<div class="blk">' + head("日股熱門股", "主要大型股中依成交金額排序") + topTable(d.jpTop, { valueLabel: "成交額（億日圓）", value: function (x) { return fmt(n(x.value) / 1e8, 0); } }) + "</div>" +
       '<div class="blk">' + head("日本財經新聞") + newsHtml(d.news && d.news.jp, 4) + "</div>" +
       "</section></div>";
     h += '<hr class="dash">';
-    h += '<section>' + headR("匯率", '<span class="h-note">' + esc(fxNote(d)) + "</span>" + rangeSeg("fx", FX_RANGES, UI.fxRange)) + '<div class="fx-grid">' +
+    h += '<section><div class="region-row"><div class="region">匯率</div><span class="h-note">' + esc(fxNote(d)) + "</span>" + rangeSeg("fx", FX_RANGES, UI.fxRange) + '</div><div class="fx-grid">' +
       "<div>" + head("新台幣兌美元") + (fx.rate || fx) + "</div>" +
       "<div>" + head("匯率波動度", "20 日年化歷史波動率") + (fx.vol || "") + "</div>" +
       "<div>" + head("其他主要匯率") + fxOthers(d) + '<div class="blk" style="margin-top:16px">' + head("匯率新聞") + newsHtml(d.news && d.news.fx, 3) + "</div></div>" +
@@ -311,8 +327,9 @@
       h += '<div class="blk">' + head("今日熱門股", "依" + (tt.basis || "成交金額") + "排序") + topTable(tt.items, { valueLabel: tt.basis === "成交金額" ? "成交值（億）" : "成交量（張）", value: function (x) { return fmt(x.value, tt.basis === "成交金額" ? 1 : 0); } }) + "</div>";
       h += '<div class="blk">' + head("新聞") + newsHtml(d.news && d.news.tw, 8) + "</div>";
     } else if (UI.tab === "us") {
-      h += '<div class="blk">' + head("美股指數", usNote(d)) + usIndexTable(d) + "</div>";
-      h += '<div class="blk">' + head("今日熱門股", "主要大型股中依成交金額排序") + topTable(d.usTop, { valueLabel: "成交額（億美元）", value: function (x) { return fmt(n(x.value) / 1e8, 1); } }) + "</div>";
+      h += '<div class="blk">' + usCardsHtml(d) + "</div>";
+      h += '<div class="blk">' + head("美股重點股", "依成交金額排序") + topTable(d.usTop, { valueLabel: "成交額（億美元）", value: function (x) { return fmt(n(x.value) / 1e8, 1); } }) + "</div>";
+      h += '<div class="blk">' + head("其他指標", usNote(d)) + usIndexTable(d, ["^GSPC", "^SOX"]) + "</div>";
       h += '<div class="blk">' + head("新聞") + newsHtml(d.news && d.news.us, 8) + "</div>";
     } else if (UI.tab === "jp") {
       h += '<div class="blk">' + head("日股指數") + rangeSeg("jp", JP_RANGES, UI.jpRange) + jpIndexHtml(d) + "</div>";
@@ -334,7 +351,10 @@
     renderDesk(DATA); renderMob(DATA);
     $("stamp").textContent = "資料 " + (DATA.asOf ? DATA.asOf.slice(5).replace("-", "/") : "—") + "｜更新 " + time(DATA.updatedAt);
     var hours = (Date.now() - new Date(DATA.updatedAt).getTime()) / 36e5, w = $("warn");
-    if (hours > 30) { w.textContent = "資料已超過 " + Math.floor(hours) + " 小時未更新，可能遇到假日或排程暫停。"; w.hidden = false; } else w.hidden = true;
+    var stale = (DATA.stale || []).filter(function (x) { return !/^新聞/.test(x); });
+    if (hours > 30) { w.textContent = "資料已超過 " + Math.floor(hours) + " 小時未更新，可能遇到假日或排程暫停。"; w.hidden = false; }
+    else if (stale.length) { w.textContent = "以下項目本次未能更新，暫時沿用上次取得的資料：" + stale.join("、"); w.hidden = false; }
+    else w.hidden = true;
     document.documentElement.style.setProperty("--bar-h", $("bar").offsetHeight + "px");
   }
 
