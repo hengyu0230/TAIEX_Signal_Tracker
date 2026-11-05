@@ -132,8 +132,33 @@ async function series(kind, fn, need) {
   return out.reverse();
 }
 
+// Yahoo Finance：先用一般方式，被拒時改用 cookie + crumb 驗證方式；連續失敗則暫停使用
+let yAuth = null, yFails = 0;
+async function yahooAuth() {
+  if (yAuth !== null) return yAuth;
+  yAuth = false;
+  try {
+    const r = await fetch("https://fc.yahoo.com", { headers: { "User-Agent": UA }, redirect: "manual", signal: AbortSignal.timeout(15000) });
+    const cookie = (r.headers.getSetCookie ? r.headers.getSetCookie() : []).map(c => c.split(";")[0]).join("; ");
+    const r2 = await fetch("https://query2.finance.yahoo.com/v1/test/getcrumb", { headers: { "User-Agent": UA, Cookie: cookie }, signal: AbortSignal.timeout(15000) });
+    const crumb = (await r2.text()).trim();
+    if (r2.ok && crumb && crumb.length < 40 && !crumb.includes("<")) yAuth = { cookie, crumb };
+  } catch {}
+  return yAuth;
+}
 async function yahoo(sym, range) {
-  const j = await getJSON(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=${range}&interval=1d`);
+  if (yFails >= 3) throw new Error("暫時無法連線");
+  const path = `/v8/finance/chart/${encodeURIComponent(sym)}?range=${range}&interval=1d`;
+  let j;
+  try { j = await getJSON("https://query1.finance.yahoo.com" + path); }
+  catch (e1) {
+    const a = await yahooAuth();
+    if (!a) { yFails++; throw e1; }
+    const r = await fetch("https://query2.finance.yahoo.com" + path + "&crumb=" + encodeURIComponent(a.crumb), { headers: { "User-Agent": UA, Cookie: a.cookie, Accept: "application/json" }, signal: AbortSignal.timeout(20000) });
+    if (!r.ok) { yFails++; throw new Error(`Yahoo HTTP ${r.status}`); }
+    j = await r.json();
+  }
+  yFails = 0;
   const res = j.chart.result[0], q = res.indicators.quote[0], off = res.meta.gmtoffset || 0;
   const map = {};
   (res.timestamp || []).forEach((t, i) => {
@@ -142,6 +167,89 @@ async function yahoo(sym, range) {
     map[date] = { date, o: round(q.open[i]), h: round(q.high[i]), l: round(q.low[i]), c: round(q.close[i], 4), v: q.volume ? q.volume[i] : null };
   });
   return Object.values(map).sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+
+// 美國聯準會經濟資料庫（FRED）：官方公開資料，不需金鑰；作為 Yahoo 無法使用時的備援
+async function fred(id, days = 400) {
+  const from = addDays(tpeToday(), -days);
+  const r = await fetch(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=${id}&cosd=${from}`, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20000) });
+  if (!r.ok) throw new Error(`FRED HTTP ${r.status}`);
+  const lines = (await r.text()).trim().split(/\r?\n/).slice(1);
+  const bars = lines.map(l => { const [d, v] = l.split(","); return { date: d, c: toNum(v) }; }).filter(b => /^\d{4}-\d{2}-\d{2}$/.test(b.date) && b.c != null);
+  if (!bars.length) throw new Error("FRED 無資料");
+  return bars;
+}
+
+// 證交所：加權指數每日開高低收（每月一次請求，過去月份存入快取）
+async function twseIndexMonth(ym) {
+  const urls = [
+    `https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_HIST?date=${ym}01&response=json`,
+    `https://www.twse.com.tw/indicesReport/MI_5MINS_HIST?response=json&date=${ym}01`,
+  ];
+  let lastErr;
+  for (const u of urls) {
+    try {
+      const j = await getJSON(u);
+      if (j && j.stat && j.stat !== "OK") return [];
+      return allRows(j).filter(r => /^\d{2,3}\/\d{2}\/\d{2}$/.test(String(r[0]).trim()) && r.length >= 5).map(r => {
+        const [y, mo, d] = String(r[0]).trim().split("/");
+        return { date: `${Number(y) + 1911}-${mo}-${d}`, o: toNum(r[1]), h: toNum(r[2]), l: toNum(r[3]), c: toNum(r[4]) };
+      }).filter(b => b.c != null);
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
+}
+async function twseIndexHistory(months = 10) {
+  cache.idx = cache.idx || {};
+  const today = tpeToday(), curYm = today.slice(0, 7).replace("-", "");
+  let bars = [];
+  for (let i = months - 1; i >= 0; i--) {
+    const d = new Date(today.slice(0, 7) + "-01T00:00:00Z"); d.setUTCMonth(d.getUTCMonth() - i);
+    const ym = d.toISOString().slice(0, 7).replace("-", "");
+    let rows = ym !== curYm ? cache.idx[ym] : null;
+    if (!rows) {
+      rows = await twseIndexMonth(ym);
+      await sleep(CFG.TWSE_DELAY_MS);
+      if (ym !== curYm && rows.length) cache.idx[ym] = rows;
+    }
+    bars = bars.concat(rows);
+  }
+  for (const k of Object.keys(cache.idx)) if (k < addDays(today, -400).slice(0, 7).replace("-", "")) delete cache.idx[k];
+  if (bars.length < 25) throw new Error("證交所指數資料不足");
+  return bars;
+}
+
+// 期交所：每日外匯參考匯率（取最新一筆美元兌新台幣，補足 FRED 的延遲）
+async function taifexFxLatest() {
+  const BASE = "https://openapi.taifex.com.tw";
+  let rows = null;
+  try { rows = await getJSON(BASE + "/v1/DailyForeignExchangeRates"); } catch {}
+  if (!Array.isArray(rows)) {
+    const sw = await getJSON(BASE + "/swagger.json");
+    const p = Object.keys(sw.paths || {}).find(k => /ForeignExchange/i.test(k));
+    if (!p) throw new Error("找不到匯率介面");
+    const bp = sw.basePath && !p.startsWith(sw.basePath) ? sw.basePath : "";
+    rows = await getJSON(BASE + bp + p);
+  }
+  if (!Array.isArray(rows) || !rows.length) throw new Error("匯率資料為空");
+  const keys = Object.keys(rows[0]);
+  const kUsd = keys.find(k => /USD.{0,3}NTD|美元.{0,3}新台幣/i.test(k));
+  const kDate = keys.find(k => /date|日期/i.test(k));
+  if (!kUsd) throw new Error("找不到美元兌新台幣欄位");
+  return rows.map(r => {
+    let d = String(r[kDate] || ""); if (/^\d{8}$/.test(d)) d = `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}`; else d = d.replace(/\//g, "-");
+    return { date: d, c: toNum(r[kUsd]) };
+  }).filter(b => /^\d{4}-\d{2}-\d{2}$/.test(b.date) && b.c != null);
+}
+function mergeBars(a, b) { const m = {}; a.concat(b).forEach(x => { m[x.date] = x; }); return Object.values(m).sort((x, y) => (x.date < y.date ? -1 : 1)); }
+
+// 依序嘗試多個來源，回傳第一個成功的結果與來源名稱
+async function firstOk(label, tries) {
+  const msgs = [];
+  for (const [src, fn] of tries) {
+    try { const v = await fn(); return { v, src }; } catch (e) { msgs.push(`${src}：${errText(e)}`); }
+  }
+  throw new Error(msgs.join("；"));
 }
 
 const movingAvg = (bars, n) => bars.map((_, i) => (i < n - 1 ? null : round(bars.slice(i - n + 1, i + 1).reduce((s, b) => s + b.c, 0) / n)));
@@ -264,14 +372,17 @@ const out = {
   config: { foreignCalm: CFG.FOREIGN_CALM, marginRatio: CFG.MARGIN_RATIO },
 };
 
-// 加權指數
+// 加權指數（優先使用證交所官方資料）
 try {
-  const bars = await yahoo("^TWII", "1y");
+  const { v: bars, src } = await firstOk("加權指數", [
+    ["臺灣證券交易所", () => twseIndexHistory(10)],
+    ["Yahoo Finance", () => yahoo("^TWII", "1y")],
+  ]);
   const ma20 = movingAvg(bars, 20), ma120 = movingAvg(bars, 120);
   const recent = bars.slice(-120);
   const peak = recent.reduce((a, b) => (b.c > a.c ? b : a), recent[0]);
   const n = bars.length;
-  out.tw = { bars: bars.slice(-60).map(({ v, ...b }) => b), ma20: ma20.slice(-60), ma120: ma120.slice(-60), last: bars[n - 1], change: n > 1 ? pctChg(bars[n - 1].c, bars[n - 2].c) : null, peak };
+  out.tw = { src, bars: bars.slice(-60).map(({ v, ...b }) => b), ma20: ma20.slice(-60), ma120: ma120.slice(-60), last: bars[n - 1], change: n > 1 ? pctChg(bars[n - 1].c, bars[n - 2].c) : null, peak };
   out.asOf = bars[n - 1].date;
 } catch (e) { errors.push("加權指數：" + errText(e)); }
 
@@ -287,31 +398,48 @@ if (out.tw) {
 }
 out.foreign = await series("f", fetchForeign, CFG.FOREIGN_DAYS);
 
-// 美股
+// 美股（Yahoo 無法使用時，指數改用 FRED；費城半導體與台積電 ADR 無備援）
+const US_FRED = { "^GSPC": "SP500", "^IXIC": "NASDAQCOM", "^TNX": "DGS10", "^VIX": "VIXCLS" };
 for (const it of CFG.US) {
   try {
-    const q = await quoteSeries(it.sym, "3mo");
-    out.us.push({ ...it, bars: q.bars.slice(-22).map(b => ({ date: b.date, c: b.c })), last: q.last.c, date: q.last.date,
-      change: q.prev ? pctChg(q.last.c, q.prev.c) : null, diff: q.prev ? round(q.last.c - q.prev.c, 3) : null });
+    const tries = [["Yahoo Finance", () => yahoo(it.sym, "3mo")]];
+    if (US_FRED[it.sym]) tries.push(["FRED", () => fred(US_FRED[it.sym], 120)]);
+    const { v: bars, src } = await firstOk(it.name, tries);
+    const n = bars.length, last = bars[n - 1], prev = n > 1 ? bars[n - 2] : null;
+    out.us.push({ ...it, src, bars: bars.slice(-22).map(b => ({ date: b.date, c: b.c })), last: last.c, date: last.date,
+      change: prev ? pctChg(last.c, prev.c) : null, diff: prev ? round(last.c - prev.c, 3) : null });
   } catch (e) { errors.push(it.name + "：" + errText(e)); out.us.push({ ...it, bars: [], last: null }); }
   await sleep(150);
 }
-out.usTop = await watchTop(CFG.US_WATCH);
+out.usTop = yFails >= 3 ? [] : await watchTop(CFG.US_WATCH);
+if (yFails >= 3) errors.push("美股熱門股：Yahoo Finance 暫時無法連線");
 
 // 日股
 try {
-  const n = await quoteSeries("^N225", "3mo");
-  const usdjpy = await quoteSeries("JPY=X", "1mo");
+  const { v: nb, src } = await firstOk("日經 225", [["Yahoo Finance", () => yahoo("^N225", "3mo")], ["FRED", () => fred("NIKKEI225", 120)]]);
+  const { v: jb } = await firstOk("美元兌日圓", [["Yahoo Finance", () => yahoo("JPY=X", "1mo")], ["FRED", () => fred("DEXJPUS", 60)]]);
+  const n = nb.length, k = jb.length;
   out.jp = {
-    index: { name: "日經 225", last: n.last.c, date: n.last.date, change: n.prev ? pctChg(n.last.c, n.prev.c) : null, bars: n.bars.slice(-60).map(({ v, ...b }) => b) },
-    usdjpy: { last: usdjpy.last.c, change: usdjpy.prev ? pctChg(usdjpy.last.c, usdjpy.prev.c) : null, bars: usdjpy.bars.map(b => ({ date: b.date, c: b.c })) },
+    src,
+    index: { name: "日經 225", last: nb[n - 1].c, date: nb[n - 1].date, change: n > 1 ? pctChg(nb[n - 1].c, nb[n - 2].c) : null, bars: nb.slice(-60).map(({ v, ...b }) => b) },
+    usdjpy: { last: jb[k - 1].c, change: k > 1 ? pctChg(jb[k - 1].c, jb[k - 2].c) : null, bars: jb.slice(-22).map(b => ({ date: b.date, c: b.c })) },
   };
 } catch (e) { errors.push("日股指數：" + errText(e)); }
-out.jpTop = await watchTop(CFG.JP_WATCH);
+out.jpTop = yFails >= 3 ? [] : await watchTop(CFG.JP_WATCH);
+if (yFails >= 3) errors.push("日股熱門股：Yahoo Finance 暫時無法連線");
 
 // 匯率與波動度（20 日年化歷史波動率）
 try {
-  const bars = await yahoo("TWD=X", "1y");
+  const { v: raw, src } = await firstOk("美元兌新台幣", [
+    ["Yahoo Finance", () => yahoo("TWD=X", "1y")],
+    ["FRED＋臺灣期貨交易所", async () => {
+      const hist = await fred("DEXTAUS", 400);
+      let latest = [];
+      try { latest = await taifexFxLatest(); } catch (e) { errors.push("期交所匯率：" + errText(e)); }
+      return mergeBars(hist, latest);
+    }],
+  ]);
+  const bars = raw.map(b => ({ date: b.date, c: b.c }));
   const rets = bars.map((b, i) => (i ? Math.log(b.c / bars[i - 1].c) : null));
   const vol = bars.map((_, i) => {
     if (i < 20) return null;
@@ -324,13 +452,17 @@ try {
   const cur = vol.at(-1);
   const pctRank = cur != null && valid.length ? valid.filter(v => v <= cur).length / valid.length : null;
   out.fx = {
-    usdtwd: { last: bars.at(-1).c, date: bars.at(-1).date, change: bars.length > 1 ? pctChg(bars.at(-1).c, bars.at(-2).c) : null, bars: bars.slice(-120).map(b => ({ date: b.date, c: b.c })) },
+    src,
+    usdtwd: { last: bars.at(-1).c, date: bars.at(-1).date, change: bars.length > 1 ? pctChg(bars.at(-1).c, bars.at(-2).c) : null, bars: bars.slice(-120) },
     vol: { current: cur, avg: valid.length ? round(valid.reduce((a, b) => a + b, 0) / valid.length, 2) : null, max: valid.length ? Math.max(...valid) : null, rank: pctRank, series: vol.slice(-120) },
     others: [],
   };
-  for (const [sym, name] of [["JPY=X", "美元兌日圓"], ["EURUSD=X", "歐元兌美元"], ["CNY=X", "美元兌人民幣"]]) {
-    try { const q = await quoteSeries(sym, "5d"); out.fx.others.push({ name, last: q.last.c, change: q.prev ? pctChg(q.last.c, q.prev.c) : null }); }
-    catch (e) { errors.push(name + "：" + errText(e)); }
+  for (const [sym, name, fid, inv] of [["JPY=X", "美元兌日圓", "DEXJPUS"], ["EURUSD=X", "歐元兌美元", "DEXUSEU"], ["CNY=X", "美元兌人民幣", "DEXCHUS"]]) {
+    try {
+      const { v: b, src: s2 } = await firstOk(name, [["Yahoo Finance", () => yahoo(sym, "5d")], ["FRED", () => fred(fid, 30)]]);
+      const n = b.length;
+      out.fx.others.push({ name, src: s2, date: b[n - 1].date, last: b[n - 1].c, change: n > 1 ? pctChg(b[n - 1].c, b[n - 2].c) : null });
+    } catch (e) { errors.push(name + "：" + errText(e)); }
   }
 } catch (e) { errors.push("匯率：" + errText(e)); }
 
