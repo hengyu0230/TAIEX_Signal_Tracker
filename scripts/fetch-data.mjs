@@ -56,8 +56,8 @@ const round = (n, d = 2) => (n == null || !Number.isFinite(Number(n)) ? null : M
 // 錯誤訊息只保留前 120 字，避免把外部網站的回應內容寫進公開資料檔
 const errText = e => String(e && e.message ? e.message : e).replace(/\s+/g, " ").slice(0, 120);
 
-async function getJSON(url) {
-  const r = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json" }, signal: AbortSignal.timeout(20000) });
+async function getJSON(url, timeoutMs = 20000, extraHeaders = {}) {
+  const r = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json", ...extraHeaders }, signal: AbortSignal.timeout(timeoutMs) });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -180,19 +180,26 @@ async function yahooIntraday(sym) {
   return { date: day, points: pts.filter(p => p.date === day).map(p => ({ t: p.t, v: p.c })) };
 }
 
-// 證交所：每 5 秒指數統計，取加權指數並整理為每分鐘一點
+// 證交所：每 5 秒指數統計，取加權指數並整理為每分鐘一點（資料量大，給較長的等待時間）
 async function twseIntraday(date) {
+  const d = ymd(date);
   const urls = [
-    `https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_INDEX?date=${ymd(date)}&response=json`,
-    `https://www.twse.com.tw/exchangeReport/MI_5MINS_INDEX?response=json&date=${ymd(date)}`,
+    `https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_INDEX?date=${d}&response=json`,
+    `https://www.twse.com.tw/exchangeReport/MI_5MINS_INDEX?response=json&date=${d}`,
+    `https://www.twse.com.tw/indicesReport/MI_5MINS_INDEX?response=json&date=${d}`,
   ];
-  let lastErr;
+  const msgs = [];
   for (const u of urls) {
     try {
-      const j = await getJSON(u);
-      if (j && j.stat && j.stat !== "OK") throw new Error("當日無資料");
-      const tbl = Array.isArray(j.data) ? { fields: j.fields || [], data: j.data } : (j.tables || []).find(t => Array.isArray(t.data) && t.data.length) || { fields: [], data: [] };
-      let ci = (tbl.fields || []).findIndex(f => String(f).includes("發行量加權股價指數"));
+      const j = await getJSON(u, 60000);
+      if (j && j.stat && j.stat !== "OK") { msgs.push(String(j.stat).slice(0, 40)); continue; }
+      const tables = [];
+      if (Array.isArray(j.data)) tables.push({ fields: j.fields || [], data: j.data });
+      (j.tables || []).forEach(t => { if (Array.isArray(t.data)) tables.push({ fields: t.fields || [], data: t.data }); });
+      const tbl = tables.find(t => t.data.some(r => /^\d{2}:\d{2}/.test(String(r[0]).trim())));
+      if (!tbl) { msgs.push("找不到時間欄位"); continue; }
+      let ci = tbl.fields.findIndex(f => String(f).includes("發行量加權股價指數"));
+      if (ci < 0) ci = tbl.fields.findIndex(f => String(f).includes("加權"));
       if (ci < 0) ci = 1;
       const byMin = {};
       tbl.data.forEach(r => {
@@ -202,11 +209,27 @@ async function twseIntraday(date) {
         byMin[t.slice(0, 5)] = v;
       });
       const points = Object.keys(byMin).sort().map(t => ({ t, v: byMin[t] }));
-      if (points.length < 10) throw new Error("盤中資料不足");
-      return { date, points };
-    } catch (e) { lastErr = e; }
+      if (points.length >= 10) return { date, points };
+      msgs.push("盤中資料不足");
+    } catch (e) { msgs.push(errText(e)); }
+    await sleep(1000);
   }
-  throw lastErr;
+  throw new Error(msgs.join("；"));
+}
+
+// 證交所即時行情（基本市況報導）：盤中每次排程取一個點，累積成當日走勢
+async function misIndexNow() {
+  let cookie = "";
+  try {
+    const r0 = await fetch("https://mis.twse.com.tw/stock/index.jsp", { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(15000) });
+    cookie = (r0.headers.getSetCookie ? r0.headers.getSetCookie() : []).map(c => c.split(";")[0]).join("; ");
+  } catch {}
+  const j = await getJSON(`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw&json=1&delay=0&_=${Date.now()}`, 15000, cookie ? { Cookie: cookie, Referer: "https://mis.twse.com.tw/stock/index.jsp" } : {});
+  const m = j && j.msgArray && j.msgArray[0];
+  if (!m) throw new Error("即時行情無資料");
+  const v = toNum(m.z), d = String(m.d || "");
+  if (v == null || !/^\d{8}$/.test(d)) throw new Error("即時行情格式不符");
+  return { date: `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}`, t: String(m.t || "").slice(0, 5), v, prevClose: toNum(m.y) };
 }
 
 // 美國聯準會經濟資料庫（FRED）：官方公開資料，不需金鑰；作為 Yahoo 無法使用時的備援
@@ -327,81 +350,50 @@ async function fetchTaifex() {
   const kChg = key(/^change$|^漲跌價$/i) || key(/change|漲跌/i, /%|percent/i);
   const kVol = key(/^volume$|成交量/i) || key(/volume/i);
   const kDate = key(/^date$|日期/i);
-  let list = rows.filter(r => String(r[kContract] ?? "").trim() === "TX" && !String(r[kMonth] ?? "").includes("/"));
-  const regular = list.filter(r => !kSession || /一般|regular|^0$/i.test(String(r[kSession])));
-  if (regular.length) list = regular;
-  list = list.filter(r => toNum(r[kLast]) != null).sort((a, b) => String(a[kMonth]).localeCompare(String(b[kMonth])));
-  const r = list[0];
-  if (!r) throw new Error("找不到台指期近月資料");
-  const last = toNum(r[kLast]), chg = toNum(r[kChg]);
-  let date = kDate ? String(r[kDate]) : null;
-  if (date && /^\d{8}$/.test(date)) date = `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}`;
-  return { contract: "TX", month: String(r[kMonth]).trim(), last, change: chg, changePct: chg != null && last ? chg / (last - chg) : null, volume: toNum(r[kVol]), date };
+  const all = rows.filter(r => String(r[kContract] ?? "").trim() === "TX" && !String(r[kMonth] ?? "").includes("/"));
+  const isNight = r => kSession && /盤後|after|夜|^1$/i.test(String(r[kSession]));
+  function pick(list) {
+    list = list.filter(r => toNum(r[kLast]) != null).sort((a, b) => String(a[kMonth]).localeCompare(String(b[kMonth])));
+    const r = list[0];
+    if (!r) return null;
+    const last = toNum(r[kLast]), chg = toNum(r[kChg]);
+    let date = kDate ? String(r[kDate]) : null;
+    if (date && /^\d{8}$/.test(date)) date = `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}`;
+    return { contract: "TX", month: String(r[kMonth]).trim(), last, change: chg, changePct: chg != null && last ? chg / (last - chg) : null, volume: toNum(r[kVol]), date };
+  }
+  const day = pick(all.filter(r => !isNight(r)));
+  if (!day) throw new Error("找不到台指期近月資料");
+  // 夜盤（盤後交易時段 15:00 至次日 05:00），期交所於收盤後公布
+  day.night = kSession ? pick(all.filter(isNight)) : null;
+  return day;
 }
 
-// 證交所：今日成交金額前 10（失敗時改用成交量前 20 名中的前 10）
-async function fetchTwTop() {
-  const rocToIso = s => { s = String(s || ""); return /^\d{7}$/.test(s) ? `${Number(s.slice(0, 3)) + 1911}-${s.slice(3, 5)}-${s.slice(5)}` : s || null; };
+/* ---------- 盤中模式：只更新加權指數今日走勢 ---------- */
+if (process.argv.includes("--intraday")) {
   try {
-    const rows = await getJSON("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL");
-    const list = rows.map(r => ({ code: String(r.Code || "").trim(), name: String(r.Name || "").trim(), close: toNum(r.ClosingPrice), change: toNum(r.Change), value: toNum(r.TradeValue) }))
-      .filter(x => x.code && x.close && x.value);
-    if (!list.length) throw new Error("清單為空");
-    list.sort((a, b) => b.value - a.value);
-    return { basis: "成交金額", date: rocToIso(rows[0] && rows[0].Date), items: list.slice(0, 10).map(x => ({ ...x, value: round(x.value / 1e8, 1), changePct: x.change != null ? x.change / (x.close - x.change) : null })) };
-  } catch (e) {
-    const d = ymd(tpeToday());
-    const j = await getJSON(`https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX20?response=json&date=${d}`);
-    const f = j.fields || [];
-    const ix = name => f.findIndex(x => String(x).includes(name));
-    const rows = (j.data || []).slice(0, 10).map(r => {
-      const close = toNum(r[ix("收盤")]), diff = toNum(r[ix("漲跌價差")]);
-      const neg = String(r[ix("漲跌(+/-)")] || "").includes("-");
-      const change = diff == null ? null : neg ? -diff : diff;
-      return { code: String(r[ix("代號")]).trim(), name: String(r[ix("名稱")]).trim(), close, change, value: round(toNum(r[ix("成交股數")]) / 1e3, 0), changePct: change != null && close ? change / (close - change) : null };
-    });
-    return { basis: "成交量（張）", date: tpeToday(), items: rows };
-  }
-}
-
-async function watchTop(list) {
-  const out = [];
-  for (const [sym, name] of list) {
-    try {
-      const q = await quoteSeries(sym, "5d");
-      out.push({ sym, name, close: q.last.c, changePct: q.prev ? pctChg(q.last.c, q.prev.c) : null, value: q.last.v ? q.last.c * q.last.v : 0, date: q.last.date });
-    } catch (e) { errors.push(`${name}：${errText(e)}`); }
-    await sleep(150);
-  }
-  return out.sort((a, b) => b.value - a.value).slice(0, 10);
-}
-
-function decodeXml(s) {
-  return String(s || "").replace(/^<!\[CDATA\[|\]\]>$/g, "")
-    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
-    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
-    .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
-    .replace(/<[^>]*>/g, "").trim();
-}
-
-// Google 新聞 RSS：只保留標題、來源、時間與連結
-async function fetchNews(cfg, region) {
-  const url = `https://news.google.com/rss/search?q=${encodeURIComponent(cfg.q)}&hl=${cfg.hl}&gl=${cfg.gl}&ceid=${encodeURIComponent(cfg.ceid)}`;
-  const r = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20000) });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  const xml = await r.text();
-  const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)].map(m => {
-    const tag = t => { const x = m[1].match(new RegExp(`<${t}[^>]*>([\\s\\S]*?)</${t}>`)); return x ? decodeXml(x[1]) : ""; };
-    const src = m[1].match(/<source url="([^"]*)"[^>]*>([\s\S]*?)<\/source>/);
-    const source = src ? decodeXml(src[2]) : "";
-    let title = tag("title");
-    if (source && title.endsWith(" - " + source)) title = title.slice(0, -(source.length + 3));
-    const link = tag("link");
-    const t = Date.parse(tag("pubDate"));
-    return { region, title: title.slice(0, 160), source: source.slice(0, 60), link, time: Number.isFinite(t) ? new Date(t).toISOString() : null };
-  }).filter(x => x.title && /^https:\/\//.test(x.link));
-  items.sort((a, b) => (b.time || "").localeCompare(a.time || ""));
-  return items.slice(0, CFG.NEWS_COUNT);
+    const p = await misIndexNow();
+    cache.intra = cache.intra || {};
+    for (const k of Object.keys(cache.intra)) if (k < addDays(p.date, -5)) delete cache.intra[k];
+    const day = cache.intra[p.date] || { prevClose: p.prevClose, points: [] };
+    if (!day.points.some(x => x.t === p.t)) day.points.push({ t: p.t, v: p.v });
+    day.points.sort((a, b) => (a.t < b.t ? -1 : 1));
+    if (p.prevClose) day.prevClose = p.prevClose;
+    cache.intra[p.date] = day;
+    let latest = null;
+    try { latest = JSON.parse(await fs.readFile(OUT_PATH, "utf8")); } catch {}
+    if (latest && latest.tw) {
+      const cur = latest.tw.intraday;
+      // 已有證交所完整盤後資料時不覆蓋
+      if (!(cur && cur.date === p.date && cur.src === "臺灣證券交易所")) {
+        latest.tw.intraday = { date: p.date, points: day.points, prevClose: day.prevClose, src: "臺灣證券交易所即時行情（約每 10 分鐘）", live: true };
+        latest.intradayAt = new Date().toISOString();
+        await fs.writeFile(OUT_PATH, JSON.stringify(latest));
+      }
+    }
+    await fs.writeFile(CACHE_PATH, JSON.stringify(cache));
+    console.log(`盤中更新：${p.date} ${p.t} ${p.v}`);
+  } catch (e) { console.log("盤中更新失敗：" + errText(e)); }
+  process.exit(0);
 }
 
 /* ---------- 收集 ---------- */
@@ -428,6 +420,11 @@ try {
     const { v: intra, src: isrc } = await firstOk("加權指數盤中", [
       ["臺灣證券交易所", () => twseIntraday(out.asOf)],
       ["Yahoo Finance", () => yahooIntraday("^TWII")],
+      ["臺灣證券交易所即時行情", async () => {
+        const day = cache.intra && cache.intra[out.asOf];
+        if (!day || day.points.length < 2) throw new Error("無盤中取樣資料");
+        return { date: out.asOf, points: day.points };
+      }],
     ]);
     out.tw.intraday = { ...intra, src: isrc, prevClose: n > 1 ? bars[n - 2].c : null };
   } catch (e) { errors.push("加權指數今日走勢：" + errText(e)); }
