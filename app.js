@@ -4,7 +4,7 @@
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
   var DATA = null;
-  var UI = { tab: "tw", lampDesk: null, lampMob: null, jpRange: "d", fxRange: "3m" };
+  var UI = { tab: "tw", lampDesk: null, lampMob: null, jpRange: "d", fxRange: "3m", usRange: "d" };
   var STATES = { on: "亮燈（條件成立）", off: "未亮（條件未成立）", na: "資料不足" };
 
   /* ---------- 工具 ---------- */
@@ -143,13 +143,25 @@
     var m20 = (tw.ma20 || [])[tw.ma20.length - 1], m120 = (tw.ma120 || [])[tw.ma120.length - 1], c = n(tw.last && tw.last.c), f = d.taifex;
     function rel(m) { m = n(m); return m && c ? (c >= m ? "高於 " : "低於 ") + Math.abs((c / m - 1) * 100).toFixed(1) + "%" : "資料不足"; }
     return '<div class="stat"><span class="big num">' + fmt(c, 2) + '</span><span class="chg ' + cls(tw.change) + '">' + pct(tw.change) + "</span></div>" +
-      '<div class="kv"><div><b class="num">' + fmt(m20) + "</b><small>月線，收盤" + rel(m20) + '</small></div><div><b class="num">' + fmt(m120) + "</b><small>半年線，收盤" + rel(m120) + '</small></div><div><b class="num">' + (f ? fmt(f.last) : "—") + "</b><small>台指期日盤" + (f && c ? "，價差 " + sgn(n(f.last) - c, 0) : "") + "</small></div></div>";
+      '<div class="kv"><div><b class="num">' + fmt(m20) + "</b><small>月線，收盤" + rel(m20) + '</small></div><div><b class="num">' + fmt(m120) + "</b><small>半年線，收盤" + rel(m120) + '</small></div><div><b class="num">' + fmt(tw.peak && tw.peak.c) + "</b><small>近 120 日高點，距今 " + (c && tw.peak ? ((c / n(tw.peak.c) - 1) * 100).toFixed(1) + "%" : "—") + "</small></div></div>";
   }
 
-  function nightHtml(d) {
-    var f = d.taifex;
-    if (!f || !f.night) return "";
-    return '<div class="night"><span class="muted">台指期夜盤（' + esc(f.night.date || "") + '，15:00 至次日 05:00）</span><b class="num">' + fmt(f.night.last) + '</b><span class="num ' + cls(f.night.change) + '">' + sgn(f.night.change) + "（" + pct(f.night.changePct) + '）</span><span class="muted num">成交 ' + fmt(f.night.volume) + " 口</span></div>";
+  function futCard(title, sub, f, hist, emptyNote, extra) {
+    var chart = hist && hist.length > 1 ? lineChart(hist.map(function (b) { return { date: b.date, v: b.c }; }), { h: 120, dp: 0, label: title + "近期走勢" })
+      : '<p class="empty" style="margin:8px 0 4px">' + esc(emptyNote) + "</p>";
+    return '<div class="ucard"><div class="h"><h2>' + esc(title) + "</h2><span>" + esc(sub) + "</span></div>" +
+      '<div class="stat"><span class="big num">' + fmt(f.last) + '</span><span class="chg ' + cls(f.change) + '">' + sgn(f.change) + "（" + pct(f.changePct) + "）</span></div>" +
+      '<p class="muted" style="font-size:12px;margin:4px 0 6px">' + extra + "</p>" + chart + "</div>";
+  }
+  function futCardsHtml(d) {
+    var f = d.taifex; if (!f) return '<p class="empty">台指期資料未取得。</p>';
+    var c = d.tw && d.tw.last ? n(d.tw.last.c) : null, h = '<div class="ucards">';
+    h += futCard("台指期日盤", String(f.date || "").slice(5) + "｜08:45–13:45", f, f.dayHist, "日盤走勢將隨每日更新逐步累積。",
+      "近月 " + esc(f.month || "") + "｜成交 " + fmt(f.volume) + " 口" + (c ? "｜與現貨價差 " + sgn(n(f.last) - c, 0) : ""));
+    if (f.night) h += futCard("台指期夜盤", String(f.night.date || "").slice(5) + "｜15:00–05:00", f.night, f.nightHist, "夜盤走勢將隨每日更新逐步累積。",
+      "近月 " + esc(f.night.month || "") + "｜成交 " + fmt(f.night.volume) + " 口");
+    else h += '<div class="ucard"><div class="h"><h2>台指期夜盤</h2></div><p class="empty">夜盤資料未取得。</p></div>';
+    return h + "</div>";
   }
 
   function intradayHtml(it, name) {
@@ -167,7 +179,7 @@
   }
 
   function topTable(items, opt) {
-    if (!items || !items.length) return '<p class="empty">資料未取得。</p>';
+    if (!items || !items.length) return '<p class="empty">' + esc(opt.empty || "資料未取得。") + "</p>";
     var s = '<table class="t"><thead><tr><th>名稱</th><th>收盤</th><th>漲跌幅</th><th>' + esc(opt.valueLabel) + "</th></tr></thead><tbody>";
     items.forEach(function (x) {
       s += "<tr><td>" + esc(x.name) + "<small>" + esc(x.code || x.sym || "") + '</small></td><td class="num">' + fmt(x.close, 2) + '</td><td class="num ' + cls(x.changePct) + '">' + pct(x.changePct) + '</td><td class="num">' + (opt.value ? opt.value(x) : fmt(x.value, 1)) + "</td></tr>";
@@ -184,17 +196,25 @@
     }).join("") + "</ul>";
   }
 
+  var US_RANGES = [["d", "今日"], ["w", "本週"], ["1m", "1 個月"], ["3m", "3 個月"]];
+  var US_CARD_SYMS = ["^GSPC", "^SOX", "^IXIC", "TSM"];
   function usCard(u) {
     if (!u) return "";
-    var pctMode = u.unit === "%";
+    var r = UI.usRange, chart;
+    if (r === "d") {
+      chart = u.intraday && u.intraday.points && u.intraday.points.length > 1
+        ? lineChart(u.intraday.points.map(function (p) { return { t: p.t, v: p.v }; }), { h: 130, dp: 0, base: u.intraday.prevClose, baseLabel: "前收", label: u.name + "今日走勢" })
+        : '<p class="empty" style="margin:10px 0">今日盤中資料未取得。</p>';
+    } else {
+      var b = inRange(u.bars || [], r);
+      chart = lineChart(b.map(function (x) { return { date: x.date, v: x.c }; }), { h: 130, dp: 0, label: u.name + "走勢", empty: "此期間資料不足。" });
+    }
     return '<div class="ucard"><div class="h"><h2>' + esc(u.name) + "</h2><span>" + (u.date ? esc(String(u.date).slice(5)) : "") + (u.src ? "｜" + esc(u.src) : "") + "</span></div>" +
-      '<div class="stat"><span class="big num">' + fmt(u.last, 2) + (pctMode ? "%" : "") + '</span><span class="chg ' + cls(u.change) + '">' + (pctMode ? sgn(u.diff, 2) + " 點" : pct(u.change)) + "</span></div>" +
-      lineChart((u.bars || []).map(function (b) { return { date: b.date, v: b.c }; }), { h: 130, dp: 0, label: u.name + "近一月走勢", empty: "資料未取得。" }) + "</div>";
+      '<div class="stat"><span class="big num">' + fmt(u.last, 2) + '</span><span class="chg ' + cls(u.change) + '">' + pct(u.change) + "</span></div>" + chart + "</div>";
   }
   function usCardsHtml(d) {
     var us = d.us || [];
-    var pick = function (sym) { return us.filter(function (u) { return u.sym === sym; })[0]; };
-    return '<div class="ucards">' + usCard(pick("^GSPC")) + usCard(pick("^SOX")) + "</div>";
+    return '<div class="ucards">' + US_CARD_SYMS.map(function (sym) { return usCard(us.filter(function (u) { return u.sym === sym; })[0]); }).join("") + "</div>";
   }
   function usIndexTable(d, skip) {
     if (!d.us || !d.us.length) return '<p class="empty">美股資料未取得。</p>';
@@ -216,11 +236,7 @@
     var jchg = n(j.index.change);
     if (jchg == null && jb0.length > 1) jchg = n(jb0[jb0.length - 1].c) / n(jb0[jb0.length - 2].c) - 1;
     if (r === "d" && j.intraday && j.intraday.points && j.intraday.points.length > 1) chart = intradayHtml(j.intraday, "日經 225");
-    else if (r === "d") {
-      var wk = inRange(jb0, "w");
-      chart = '<p class="muted" style="margin:0 0 6px;font-size:12px">日經今日盤中資料目前無法取得（來源限制），以下改顯示本週走勢。</p>' +
-        lineChart(wk.map(function (x) { return { date: x.date, v: x.c }; }), { h: 190, label: "日經 225 本週走勢", empty: "此期間資料不足。" });
-    }
+    else if (r === "d") chart = '<p class="empty" style="margin:10px 0">日經今日盤中資料未取得，可切換其他期間查看。</p>';
     else {
       var b = inRange(j.index.bars || [], r);
       var chg = b.length > 1 ? n(b[b.length - 1].c) / n(b[0].c) - 1 : null;
@@ -270,7 +286,7 @@
       "<li>本網站資料取自公開來源並經程式自動整理，可能有延遲、遺漏或錯誤；實際數據以各資料來源之官方公告為準。</li>" +
       "<li>新聞標題與連結之著作權屬原刊登媒體所有，本網站僅提供索引，內容以原始報導為準。</li>" +
       "<li>本網站與下列資料來源機構無任何關聯，亦未獲其授權或背書。使用本網站即表示您已閱讀並同意上述聲明。</li>" +
-      '</ol><div class="src">資料來源：臺灣證券交易所、臺灣期貨交易所、Yahoo Finance、美國聯準會經濟資料庫（FRED）、Google 新聞。本網站資料為收盤後整理，並非即時報價。資料更新時間 ' + esc(time(d && d.updatedAt)) + "。</div></div>";
+      '</ol><div class="src">資料來源：臺灣證券交易所、臺灣期貨交易所、Yahoo Finance、美國聯準會經濟資料庫（FRED）、Google 新聞。本網站資料為收盤後整理，並非即時報價。資料更新時間 ' + esc(time(d && d.updatedAt)) + "。資料程式版本 " + esc((d && d.version) || "舊版") + "。</div></div>";
   }
 
   /* ---------- 電腦版 ---------- */
@@ -281,7 +297,8 @@
     h += '<div class="cols even">';
     h += "<section>" +
       '<div class="blk">' + head("指示訊號", "點選燈號查看說明") + lampsHtml(d, "desk") + "</div>" +
-      '<div class="blk">' + head("加權指數｜今日走勢", (d.tw && d.tw.intraday ? d.tw.intraday.src : (d.tw && d.tw.src) || "")) + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數") + nightHtml(d) + "</div>" +
+      '<div class="blk">' + head("加權指數｜今日走勢", (d.tw && d.tw.intraday ? d.tw.intraday.src : (d.tw && d.tw.src) || "")) + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數") + "</div>" +
+      '<div class="blk">' + futCardsHtml(d) + "</div>" +
       '<div class="blk">' + head("外資買賣超（億元）", "近 " + ((d.foreign || []).length) + " 個交易日") + barChart(d.foreign) + "</div>" +
       "</section>";
     h += "<section>" +
@@ -291,15 +308,15 @@
       "</section></div>";
     h += '<hr class="dash">';
     h += '<div class="cols even"><section>' +
-      '<div class="region">美股</div>' +
+      '<div class="region-row"><div class="region">美股</div>' + rangeSeg("us", US_RANGES, UI.usRange) + "</div>" +
       '<div class="blk">' + usCardsHtml(d) + "</div>" +
-      '<div class="blk">' + head("美股重點股", "主要大型股，依成交金額排序") + topTable(d.usTop, { valueLabel: "成交額（億美元）", value: function (x) { return fmt(n(x.value) / 1e8, 1); } }) + "</div>" +
-      '<div class="blk">' + head("其他指標", usNote(d)) + usIndexTable(d, ["^GSPC", "^SOX"]) + "</div>" +
+      '<div class="blk">' + head("美股重點股", "主要大型股，依成交金額排序") + topTable(d.usTop, { empty: "資料未取得：目前來源拒絕連線，設定 Stooq 金鑰後即可顯示。", valueLabel: "成交額（億美元）", value: function (x) { return fmt(n(x.value) / 1e8, 1); } }) + "</div>" +
+      '<div class="blk">' + head("其他指標", usNote(d)) + usIndexTable(d, US_CARD_SYMS) + "</div>" +
       '<div class="blk">' + head("美國財經新聞") + newsHtml(d.news && d.news.us, 4) + "</div>" +
       "</section><section>" +
       '<div class="region-row"><div class="region">日股</div>' + rangeSeg("jp", JP_RANGES, UI.jpRange) + "</div>" +
       '<div class="blk">' + jpIndexHtml(d) + "</div>" +
-      '<div class="blk">' + head("日股熱門股", "主要大型股中依成交金額排序") + topTable(d.jpTop, { valueLabel: "成交額（億日圓）", value: function (x) { return fmt(n(x.value) / 1e8, 0); } }) + "</div>" +
+      '<div class="blk">' + head("日股熱門股", "主要大型股中依成交金額排序") + topTable(d.jpTop, { empty: "資料未取得：目前來源拒絕連線，設定 Stooq 金鑰後即可顯示。", valueLabel: "成交額（億日圓）", value: function (x) { return fmt(n(x.value) / 1e8, 0); } }) + "</div>" +
       '<div class="blk">' + head("日本財經新聞") + newsHtml(d.news && d.news.jp, 4) + "</div>" +
       "</section></div>";
     h += '<hr class="dash">';
@@ -321,19 +338,20 @@
     var tt = d.twTop || {};
     if (UI.tab === "tw") {
       h += '<div class="blk">' + head("止跌訊號", "點選燈號查看說明") + lampsHtml(d, "mob") + "</div>";
-      h += '<div class="blk">' + head("加權指數｜今日走勢", d.asOf || "") + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數") + nightHtml(d) + "</div>";
+      h += '<div class="blk">' + head("加權指數｜今日走勢", d.asOf || "") + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數") + "</div>";
+      h += '<div class="blk">' + futCardsHtml(d) + "</div>";
       h += '<div class="blk">' + head("加權指數｜近 3 個月", "K 線與均線") + k3mHtml(d) + "</div>";
       h += '<div class="blk">' + head("外資買賣超（億元）") + barChart(d.foreign) + "</div>";
       h += '<div class="blk">' + head("今日熱門股", "依" + (tt.basis || "成交金額") + "排序") + topTable(tt.items, { valueLabel: tt.basis === "成交金額" ? "成交值（億）" : "成交量（張）", value: function (x) { return fmt(x.value, tt.basis === "成交金額" ? 1 : 0); } }) + "</div>";
       h += '<div class="blk">' + head("新聞") + newsHtml(d.news && d.news.tw, 8) + "</div>";
     } else if (UI.tab === "us") {
-      h += '<div class="blk">' + usCardsHtml(d) + "</div>";
-      h += '<div class="blk">' + head("美股重點股", "依成交金額排序") + topTable(d.usTop, { valueLabel: "成交額（億美元）", value: function (x) { return fmt(n(x.value) / 1e8, 1); } }) + "</div>";
-      h += '<div class="blk">' + head("其他指標", usNote(d)) + usIndexTable(d, ["^GSPC", "^SOX"]) + "</div>";
+      h += rangeSeg("us", US_RANGES, UI.usRange) + '<div class="blk">' + usCardsHtml(d) + "</div>";
+      h += '<div class="blk">' + head("美股重點股", "依成交金額排序") + topTable(d.usTop, { empty: "資料未取得：目前來源拒絕連線，設定 Stooq 金鑰後即可顯示。", valueLabel: "成交額（億美元）", value: function (x) { return fmt(n(x.value) / 1e8, 1); } }) + "</div>";
+      h += '<div class="blk">' + head("其他指標", usNote(d)) + usIndexTable(d, US_CARD_SYMS) + "</div>";
       h += '<div class="blk">' + head("新聞") + newsHtml(d.news && d.news.us, 8) + "</div>";
     } else if (UI.tab === "jp") {
       h += '<div class="blk">' + head("日股指數") + rangeSeg("jp", JP_RANGES, UI.jpRange) + jpIndexHtml(d) + "</div>";
-      h += '<div class="blk">' + head("今日熱門股", "主要大型股中依成交金額排序") + topTable(d.jpTop, { valueLabel: "成交額（億日圓）", value: function (x) { return fmt(n(x.value) / 1e8, 0); } }) + "</div>";
+      h += '<div class="blk">' + head("今日熱門股", "主要大型股中依成交金額排序") + topTable(d.jpTop, { empty: "資料未取得：目前來源拒絕連線，設定 Stooq 金鑰後即可顯示。", valueLabel: "成交額（億日圓）", value: function (x) { return fmt(n(x.value) / 1e8, 0); } }) + "</div>";
       h += '<div class="blk">' + head("新聞") + newsHtml(d.news && d.news.jp, 8) + "</div>";
     } else {
       var fx = fxMain(d, true);
@@ -364,7 +382,7 @@
     if (!t) return;
     if (t.hasAttribute("data-range")) {
       var nm = t.getAttribute("data-range"), val = t.getAttribute("data-val");
-      if (nm === "jp") UI.jpRange = val; else if (nm === "fx") UI.fxRange = val;
+      if (nm === "jp") UI.jpRange = val; else if (nm === "fx") UI.fxRange = val; else if (nm === "us") UI.usRange = val;
       store(nm + "Range", val); render();
       var b = document.querySelector('[data-range="' + nm + '"][data-val="' + val + '"]'); if (b) b.focus();
       return;
