@@ -51,7 +51,7 @@
   function lineChart(points, opt) {
     opt = opt || {};
     var pts = (points || []).map(function (p) { return { d: p.date, t: p.t, v: n(p.v) }; }).filter(function (p) { return p.v != null && (opt.allowZero || p.v > 0); });
-    if (pts.length < 2) return '<p class="empty">' + esc(opt.empty || "資料不足。") + "</p>";
+    if (pts.length < 2) return opt.fallback || '<p class="empty">' + esc(opt.empty || "資料不足。") + "</p>";
     var W = opt.w || 440, H = opt.h || 170, pl = 52, pr = 6, pt = 8, pb = 20;
     var vs = pts.map(function (p) { return p.v; });
     if (n(opt.base) != null) vs.push(n(opt.base));
@@ -139,6 +139,10 @@
     return s;
   }
 
+  function twFb(d) {
+    var tw = d.tw; if (!tw || !tw.last) return null;
+    return { date: tw.last.date, value: tw.last.c, change: tw.change, prev: prevOf(tw.bars) };
+  }
   function twStatsHtml(d) {
     var tw = d.tw; if (!tw) return '<p class="empty">指數資料未取得。</p>';
     var m20 = (tw.ma20 || [])[tw.ma20.length - 1], m120 = (tw.ma120 || [])[tw.ma120.length - 1], c = n(tw.last && tw.last.c), f = d.taifex;
@@ -147,9 +151,18 @@
       '<div class="kv"><div><b class="num">' + fmt(m20) + "</b><small>月線，收盤" + rel(m20) + '</small></div><div><b class="num">' + fmt(m120) + "</b><small>半年線，收盤" + rel(m120) + '</small></div><div><b class="num">' + fmt(tw.peak && tw.peak.c) + "</b><small>近 120 日高點，距今 " + (c && tw.peak ? ((c / n(tw.peak.c) - 1) * 100).toFixed(1) + "%" : "—") + "</small></div></div>";
   }
 
+  // 無法畫出走勢時，改顯示最終收盤值
+  function closeBox(label, date, value, change, dp, prev) {
+    if (n(value) == null) return '<p class="empty">資料未取得。</p>';
+    return '<div class="closebox"><span class="muted">' + esc(label) + (date ? "（" + esc(String(date).slice(5)) + "）" : "") + '</span><b class="num">' + fmt(value, dp == null ? 2 : dp) + "</b>" +
+      (n(change) != null ? '<span class="num ' + cls(change) + '">' + pct(change) + "</span>" : "") +
+      (n(prev) != null ? '<span class="muted num">前一交易日 ' + fmt(prev, dp == null ? 2 : dp) + "</span>" : "") + "</div>";
+  }
+  function prevOf(bars) { return bars && bars.length > 1 ? bars[bars.length - 2].c : null; }
+
   function futCard(title, sub, f, hist, emptyNote, extra) {
     var chart = hist && hist.length > 1 ? lineChart(hist.map(function (b) { return { date: b.date, v: b.c }; }), { h: 120, dp: 0, label: title + "近期走勢" })
-      : '<p class="empty" style="margin:8px 0 4px">' + esc(emptyNote) + "</p>";
+      : closeBox("最終收盤", f.date, f.last, f.changePct, 0, f.last != null && f.change != null ? n(f.last) - n(f.change) : null);
     return '<div class="ucard"><div class="h"><h2>' + esc(title) + "</h2><span>" + esc(sub) + "</span></div>" +
       '<div class="stat"><span class="big num">' + fmt(f.last) + '</span><span class="chg ' + cls(f.change) + '">' + sgn(f.change) + "（" + pct(f.changePct) + "）</span></div>" +
       '<p class="muted" style="font-size:12px;margin:4px 0 6px">' + extra + "</p>" + chart + "</div>";
@@ -165,8 +178,8 @@
     return h + "</div>";
   }
 
-  function intradayHtml(it, name) {
-    if (!it || !it.points || it.points.length < 2) return '<p class="empty">今日盤中走勢資料未取得。</p>';
+  function intradayHtml(it, name, fb) {
+    if (!it || !it.points || it.points.length < 2) return closeBox("最終收盤", fb && fb.date, fb && fb.value, fb && fb.change, 2, fb && fb.prev);
     var last = it.points[it.points.length - 1].v, base = n(it.prevClose);
     var chg = base ? last / base - 1 : null;
     return '<p class="muted" style="margin:0 0 6px;font-size:12px">' + esc(it.date || "") + "　" + esc(name) + (it.live ? " 盤中（約每 10 分鐘更新）" : " 盤中") + "，虛線為前一交易日收盤" + (base ? " " + fmt(base, 2) : "") + (chg != null ? '，收盤 <span class="' + cls(chg) + '">' + pct(chg) + "</span>" : "") + "</p>" +
@@ -205,13 +218,13 @@
     if (r === "d") {
       chart = u.intraday && u.intraday.points && u.intraday.points.length > 1
         ? lineChart(u.intraday.points.map(function (p) { return { t: p.t, v: p.v }; }), { h: 130, dp: 0, base: u.intraday.prevClose, baseLabel: "前收", label: u.name + "今日走勢" })
-        : '<p class="empty" style="margin:10px 0">今日盤中走勢會在開盤後每 15 分鐘累積一次，目前尚無資料。</p>';
+        : closeBox("最終收盤", u.date, u.last, u.change, 2, prevOf(u.bars));
     } else {
       var b = inRange(u.bars || [], r);
       var from = u.bars && u.bars.length ? sinceDate(u.bars[u.bars.length - 1].date, r) : null;
-      var short = b.length && from && b[0].date > sinceDate(from, "-w");
+      var short = b.length > 1 && from && b[0].date > sinceDate(from, "-w");
       chart = (short ? '<p class="muted" style="font-size:11px;margin:2px 0 4px">目前資料自 ' + esc(b[0].date) + " 起，尚未涵蓋完整期間</p>" : "") +
-        lineChart(b.map(function (x) { return { date: x.date, v: x.c }; }), { h: 130, dp: 0, label: u.name + "走勢", empty: "此期間資料不足。" });
+        lineChart(b.map(function (x) { return { date: x.date, v: x.c }; }), { h: 130, dp: 0, label: u.name + "走勢", fallback: closeBox("最終收盤", u.date, u.last, u.change, 2, prevOf(u.bars)) });
     }
     return '<div class="ucard"><div class="h"><h2>' + esc(u.name) + "</h2><span>" + (u.date ? esc(String(u.date).slice(5)) : "") + (u.src ? "｜" + esc(u.src) : "") + "</span></div>" +
       '<div class="stat"><span class="big num">' + fmt(u.last, 2) + '</span><span class="chg ' + cls(u.change) + '">' + pct(u.change) + "</span></div>" + chart + "</div>";
@@ -240,12 +253,12 @@
     var jchg = n(j.index.change);
     if (jchg == null && jb0.length > 1) jchg = n(jb0[jb0.length - 1].c) / n(jb0[jb0.length - 2].c) - 1;
     if (r === "d" && j.intraday && j.intraday.points && j.intraday.points.length > 1) chart = intradayHtml(j.intraday, "日經 225");
-    else if (r === "d") chart = '<p class="empty" style="margin:10px 0">日經今日盤中走勢會在開盤後每 10 分鐘累積一次，目前尚無資料。</p>';
+    else if (r === "d") chart = closeBox("日經 225 最終收盤", j.index.date, j.index.last, jchg, 2, prevOf(jb0));
     else {
       var b = inRange(j.index.bars || [], r);
       var chg = b.length > 1 ? n(b[b.length - 1].c) / n(b[0].c) - 1 : null;
       chart = '<p class="muted" style="margin:0 0 6px;font-size:12px">' + (b.length ? esc(b[0].date) + " 至 " + esc(b[b.length - 1].date) : "") + (chg != null ? '，區間漲跌 <span class="' + cls(chg) + '">' + pct(chg) + "</span>" : "") + "</p>" +
-        lineChart(b.map(function (x) { return { date: x.date, v: x.c }; }), { h: 190, label: "日經 225 走勢", empty: "此期間資料不足。" });
+        lineChart(b.map(function (x) { return { date: x.date, v: x.c }; }), { h: 190, label: "日經 225 走勢", fallback: closeBox("日經 225 最終收盤", j.index.date, j.index.last, jchg, 2, prevOf(jb0)) });
     }
     return '<div class="stat"><span class="big num">' + fmt(j.index.last, 2) + '</span><span class="chg ' + cls(jchg) + '">' + pct(jchg) + '</span><span class="muted">日經 225｜' + md(j.index.date) + (j.src === "FRED" ? "（FRED，約延遲 1 個交易日）" : "") + "</span></div>" +
       '<div class="kv"><div><b class="num">' + fmt(j.usdjpy && j.usdjpy.last, 2) + '</b><small>美元兌日圓</small></div><div><b class="num ' + cls(j.usdjpy && j.usdjpy.change) + '">' + pct(j.usdjpy && j.usdjpy.change) + '</b><small>日圓匯率變動</small></div><div><b class="num">' + esc(j.src || "—") + "</b><small>資料來源</small></div></div>" + chart;
@@ -258,10 +271,10 @@
     var sel = inRange(rows, key);
     var chg = sel.length > 1 ? n(sel[sel.length - 1].c) / n(sel[0].c) - 1 : null;
     var rate = '<div class="stat"><span class="big num">' + fmt(r.last, 3) + '</span><span class="chg ' + cls(r.change) + '">' + pct(r.change) + '</span></div><p class="muted" style="margin:4px 0 8px;font-size:12px">美元兌新台幣，數字變大代表新台幣貶值' + (chg != null ? '；區間變動 <span class="' + cls(chg) + '">' + pct(chg) + "</span>" : "") + "</p>" +
-      lineChart(sel.map(function (b) { return { date: b.date, v: b.c }; }), { h: compact ? 180 : 200, dp: 2, label: "美元兌新台幣走勢", empty: "此期間資料不足。" });
+      lineChart(sel.map(function (b) { return { date: b.date, v: b.c }; }), { h: compact ? 180 : 200, dp: 2, label: "美元兌新台幣走勢", fallback: closeBox("最終收盤", r.date, r.last, r.change, 3, prevOf(r.bars)) });
     var vol = '<div class="stat"><span class="big num">' + fmt(v.current, 2) + '%</span><span class="muted">20 日年化波動度</span></div>' +
       '<div class="kv"><div><b class="num">' + fmt(v.avg, 2) + '%</b><small>一年平均</small></div><div><b class="num">' + fmt(v.max, 2) + '%</b><small>一年最高</small></div><div><b class="num">' + (n(v.rank) != null ? Math.round(v.rank * 100) + "%" : "—") + "</b><small>一年百分位</small></div></div>" +
-      lineChart(sel.map(function (b) { return { date: b.date, v: b.vol }; }), { h: compact ? 150 : 160, dp: 1, cls: "l-acc", label: "新台幣匯率波動度走勢", empty: "此期間資料不足。" });
+      lineChart(sel.map(function (b) { return { date: b.date, v: b.vol }; }), { h: compact ? 150 : 160, dp: 1, cls: "l-acc", label: "新台幣匯率波動度走勢", fallback: closeBox("最新波動度", r.date, v.current, null, 2, null) });
     return { rate: rate, vol: vol };
   }
 
@@ -301,7 +314,7 @@
     h += '<div class="cols even">';
     h += "<section>" +
       '<div class="blk">' + head("指示訊號", "點選燈號查看說明") + lampsHtml(d, "desk") + "</div>" +
-      '<div class="blk">' + head("加權指數｜今日走勢", (d.tw && d.tw.intraday ? d.tw.intraday.src : (d.tw && d.tw.src) || "")) + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數") + "</div>" +
+      '<div class="blk">' + head("加權指數｜今日走勢", (d.tw && d.tw.intraday ? d.tw.intraday.src : (d.tw && d.tw.src) || "")) + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數", twFb(d)) + "</div>" +
       '<div class="blk">' + futCardsHtml(d) + "</div>" +
       '<div class="blk">' + head("外資買賣超（億元）", "近 " + ((d.foreign || []).length) + " 個交易日") + barChart(d.foreign) + "</div>" +
       "</section>";
@@ -342,7 +355,7 @@
     var tt = d.twTop || {};
     if (UI.tab === "tw") {
       h += '<div class="blk">' + head("止跌訊號", "點選燈號查看說明") + lampsHtml(d, "mob") + "</div>";
-      h += '<div class="blk">' + head("加權指數｜今日走勢", d.asOf || "") + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數") + "</div>";
+      h += '<div class="blk">' + head("加權指數｜今日走勢", d.asOf || "") + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數", twFb(d)) + "</div>";
       h += '<div class="blk">' + futCardsHtml(d) + "</div>";
       h += '<div class="blk">' + head("加權指數｜近 3 個月", "K 線與均線") + k3mHtml(d) + "</div>";
       h += '<div class="blk">' + head("外資買賣超（億元）") + barChart(d.foreign) + "</div>";
