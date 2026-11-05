@@ -260,6 +260,30 @@ async function stooq(sym, days = 200) {
   return bars;
 }
 
+// Stooq 5 分鐘線（需要金鑰）：Stooq 時間為波蘭當地時間，轉換為交易所當地時間
+function tzOffsetMin(utcMs, tz) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).formatToParts(new Date(utcMs)).map(x => [x.type, x.value]));
+  return (Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute) - utcMs) / 60000;
+}
+function warsawToTz(date, time, tz) {
+  const naive = Date.parse(`${date}T${time.slice(0, 5)}:00Z`);
+  const utc = naive - tzOffsetMin(naive, "Europe/Warsaw") * 60000;
+  const local = new Date(utc + tzOffsetMin(utc, tz) * 60000).toISOString();
+  return { date: local.slice(0, 10), t: local.slice(11, 16) };
+}
+async function stooqIntraday(sym, tz) {
+  if (!STOOQ_KEY) throw new Error("未設定 Stooq 金鑰");
+  const d1 = ymd(addDays(tpeToday(), -6));
+  const r = await fetch(`https://stooq.com/q/d/l/?s=${encodeURIComponent(stooqSym(sym))}&d1=${d1}&i=5&apikey=${encodeURIComponent(STOOQ_KEY)}`, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20000) });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const t = (await r.text()).trim();
+  if (!/^Date,Time/i.test(t)) throw new Error(/limit/i.test(t) ? "已達每日查詢上限" : "無盤中資料");
+  const pts = t.split(/\r?\n/).slice(1).map(l => { const c = l.split(","); const lt = warsawToTz(c[0], c[1], tz); return { date: lt.date, t: lt.t, v: toNum(c[5]) }; }).filter(p => p.v != null && p.v > 0);
+  if (!pts.length) throw new Error("無盤中資料");
+  const day = pts.at(-1).date;
+  return { date: day, points: pts.filter(p => p.date === day).map(p => ({ t: p.t, v: p.v })) };
+}
+
 // 證交所：加權指數每日開高低收（每月一次請求，過去月份存入快取）
 async function twseIndexMonth(ym) {
   const urls = [
@@ -490,11 +514,40 @@ async function fetchBingNews(cfg, region) {
   if (!items.length) throw new Error("無新聞");
   return items.slice(0, CFG.NEWS_COUNT);
 }
+// 媒體官方 RSS（Google 與 Bing 都失敗時使用）
+const DIRECT_FEEDS = {
+  tw: [["自由時報財經", "https://news.ltn.com.tw/rss/business.xml"], ["中央社財經", "https://feeds.feedburner.com/rsscna/finance"]],
+  us: [["CNBC", "https://www.cnbc.com/id/10000664/device/rss/rss.html"], ["CNBC", "https://www.cnbc.com/id/100003114/device/rss/rss.html"]],
+  jp: [["NHK", "https://www3.nhk.or.jp/rss/news/cat5.xml"]],
+  fx: [["自由時報財經", "https://news.ltn.com.tw/rss/business.xml"], ["中央社財經", "https://feeds.feedburner.com/rsscna/finance"]],
+};
+async function fetchDirectNews(region) {
+  const msgs = [];
+  for (const [name, url] of DIRECT_FEEDS[region] || []) {
+    try {
+      const r = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20000) });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const xml = await r.text();
+      let items = [...xml.matchAll(/<item[\s>]([\s\S]*?)<\/item>/g)].map(m => {
+        const tag = t => { const x = m[1].match(new RegExp(`<${t}[^>]*>([\\s\\S]*?)</${t}>`)); return x ? decodeXml(x[1]) : ""; };
+        const t = Date.parse(tag("pubDate") || tag("dc:date"));
+        return { region, title: tag("title").slice(0, 160), source: name, link: tag("link"), time: Number.isFinite(t) ? new Date(t).toISOString() : null };
+      }).filter(x => x.title && /^https:\/\//.test(x.link));
+      if (region === "fx") { const f = items.filter(x => /匯|台幣|新臺幣|美元|央行/.test(x.title)); if (f.length) items = f; }
+      items.sort((a, b) => (b.time || "").localeCompare(a.time || ""));
+      if (items.length) return items.slice(0, CFG.NEWS_COUNT);
+      msgs.push(`${name} 無新聞`);
+    } catch (e) { msgs.push(`${name} ${errText(e)}`); }
+  }
+  throw new Error(msgs.join("；") || "無可用來源");
+}
+
 async function fetchNews(cfg, region) {
   const { v } = await firstOk("新聞", [
     ["Google 新聞", async () => { const x = await fetchGoogleNews(cfg, region); if (!x.length) throw new Error("無新聞"); return x; }],
     ["Google 新聞（重試）", async () => { await sleep(3000); const x = await fetchGoogleNews(cfg, region); if (!x.length) throw new Error("無新聞"); return x; }],
     ["Bing 新聞", () => fetchBingNews(cfg, region)],
+    ["媒體 RSS", () => fetchDirectNews(region)],
   ]);
   return v;
 }
@@ -531,6 +584,7 @@ if (process.argv.includes("--intraday")) {
 let prevOut = null;
 try { prevOut = JSON.parse(await fs.readFile(OUT_PATH, "utf8")); } catch {}
 const out = {
+  version: "2026-11-05d",
   updatedAt: new Date().toISOString(), asOf: null,
   tw: null, taifex: null, twTop: null, foreign: [], margin: null, marginPeak: null,
   us: [], usTop: [], jp: null, jpTop: [], fx: null, news: { tw: [], us: [], jp: [], fx: [] }, signals: [],
@@ -563,7 +617,16 @@ try {
   } catch (e) { errors.push("加權指數今日走勢：" + errText(e)); }
 } catch (e) { errors.push("加權指數：" + errText(e)); }
 
-try { out.taifex = await fetchTaifex(); } catch (e) { errors.push("台指期：" + errText(e)); }
+try {
+  out.taifex = await fetchTaifex();
+  // 累積每日夜盤收盤，畫出近期夜盤走勢
+  cache.night = cache.night || {};
+  if (out.taifex.night && out.taifex.night.date) cache.night[out.taifex.night.date] = out.taifex.night.last;
+  if (out.taifex.date) { cache.dayFut = cache.dayFut || {}; cache.dayFut[out.taifex.date] = out.taifex.last; }
+  for (const k of ["night", "dayFut"]) for (const d of Object.keys(cache[k] || {})) if (d < addDays(tpeToday(), -120)) delete cache[k][d];
+  out.taifex.nightHist = Object.keys(cache.night).sort().slice(-60).map(d => ({ date: d, c: cache.night[d] }));
+  out.taifex.dayHist = Object.keys(cache.dayFut || {}).sort().slice(-60).map(d => ({ date: d, c: cache.dayFut[d] }));
+} catch (e) { errors.push("台指期：" + errText(e)); }
 try { out.twTop = await fetchTwTop(); } catch (e) { errors.push("台股成交排行：" + errText(e)); }
 
 // 融資與外資（證交所）
@@ -584,8 +647,19 @@ for (const it of CFG.US) {
     if (STOOQ_KEY && it.sym !== "^TNX") tries.push(["Stooq", () => stooq(it.sym, 90)]);
     const { v: bars, src } = await firstOk(it.name, tries);
     const n = bars.length, last = bars[n - 1], prev = n > 1 ? bars[n - 2] : null;
-    out.us.push({ ...it, src, bars: bars.slice(-22).map(b => ({ date: b.date, c: b.c })), last: last.c, date: last.date,
-      change: prev ? pctChg(last.c, prev.c) : null, diff: prev ? round(last.c - prev.c, 3) : null });
+    const item = { ...it, src, bars: bars.slice(-70).map(b => ({ date: b.date, c: b.c })), last: last.c, date: last.date,
+      change: prev ? pctChg(last.c, prev.c) : null, diff: prev ? round(last.c - prev.c, 3) : null };
+    if (["^GSPC", "^SOX", "^IXIC", "TSM"].includes(it.sym)) {
+      try {
+        const { v: intra, src: isrc } = await firstOk(it.name + "今日走勢", [
+          ["Yahoo Finance", () => yahooIntraday(it.sym)],
+          ["Stooq", () => stooqIntraday(it.sym, "America/New_York")],
+        ]);
+        const pc = bars.filter(b => b.date < intra.date).at(-1);
+        item.intraday = { ...intra, src: isrc, prevClose: pc ? pc.c : null };
+      } catch (e) { errors.push(it.name + "今日走勢：" + errText(e)); }
+    }
+    out.us.push(item);
   } catch (e) { errors.push(it.name + "：" + errText(e)); out.us.push({ ...it, bars: [], last: null }); }
   await sleep(150);
 }
@@ -602,9 +676,12 @@ try {
     usdjpy: { last: jb[k - 1].c, change: k > 1 ? pctChg(jb[k - 1].c, jb[k - 2].c) : null, bars: jb.slice(-22).map(b => ({ date: b.date, c: b.c })) },
   };
   try {
-    const it = await yahooIntraday("^N225");
+    const { v: it, src: isrc } = await firstOk("日經 225 今日走勢", [
+      ["Yahoo Finance", () => yahooIntraday("^N225")],
+      ["Stooq", () => stooqIntraday("^N225", "Asia/Tokyo")],
+    ]);
     const prev = nb.filter(b => b.date < it.date).at(-1);
-    out.jp.intraday = { ...it, src: "Yahoo Finance", prevClose: prev ? prev.c : null };
+    out.jp.intraday = { ...it, src: isrc, prevClose: prev ? prev.c : null };
   } catch (e) { errors.push("日經 225 今日走勢：" + errText(e)); }
 } catch (e) { errors.push("日股指數：" + errText(e)); }
 out.jpTop = await watchTop(CFG.JP_WATCH, "日股熱門股");
