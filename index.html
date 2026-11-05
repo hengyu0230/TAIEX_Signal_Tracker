@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-Hant" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<meta name="referrer" content="no-referrer">
+<title>台股止跌訊號</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="止跌訊號">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0C1117" id="theme-color">
+<style>
+:root,[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0C1117;--surface:#121922;--raised:#18212C;--line:#243243;--line-soft:#1B2632;
+  --ink:#DCE3EA;--muted:#8593A3;--faint:#5D6977;--accent:#C8A35A;--accent-ink:#1A1408;
+  --up:#E5484D;--down:#30A46C;--ma20:#5B9BD5;--ma120:#C8A35A;--focus:#C8A35A;
+}
+[data-theme="light"]{
+  color-scheme:light;
+  --bg:#F3F4F6;--surface:#FFFFFF;--raised:#F7F8FA;--line:#D9DEE4;--line-soft:#E8EBEF;
+  --ink:#121820;--muted:#5B6774;--faint:#8A95A1;--accent:#8C6A1E;--accent-ink:#FFFFFF;
+  --up:#CF2E35;--down:#1D8A52;--ma20:#2C6CB0;--ma120:#8C6A1E;--focus:#8C6A1E;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;font-feature-settings:"tnum" 1}
+button{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+a{color:inherit}
+.num{font-variant-numeric:tabular-nums}
+.up{color:var(--up)}.down{color:var(--down)}.muted{color:var(--muted)}.faint{color:var(--faint)}
+
+/* Top bar */
+.bar{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:calc(env(safe-area-inset-top,0px) + 10px) 20px 10px;display:flex;align-items:center;gap:16px}
+.bar h1{font-size:15px;font-weight:600;margin:0;letter-spacing:.02em}
+.bar .stamp{color:var(--muted);font-size:12px;flex:1}
+.icon-btn{background:transparent;border:1px solid var(--line);border-radius:4px;padding:5px 10px;cursor:pointer;font-size:13px;color:var(--ink)}
+.icon-btn:hover{border-color:var(--muted)}
+.warn{color:var(--accent);font-size:12px;padding:6px 20px;border-bottom:1px solid var(--line)}
+
+/* Shared blocks */
+.h{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:0 0 10px}
+.h h2{font-size:13px;font-weight:600;margin:0;color:var(--ink)}
+.h span{font-size:11px;color:var(--faint)}
+.blk{margin-bottom:22px}
+.big{font-size:28px;font-weight:600;line-height:1.1}
+.mid{font-size:18px;font-weight:600}
+.stat{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.chg{font-size:13px;font-weight:600}
+.kv{display:grid;grid-template-columns:repeat(3,1fr);border-top:1px solid var(--line-soft);border-bottom:1px solid var(--line-soft);margin:10px 0}
+.kv div{padding:8px 0}
+.kv div+div{padding-left:12px;border-left:1px solid var(--line-soft)}
+.kv b{display:block;font-size:15px;font-weight:600}
+.kv small{color:var(--muted);font-size:11px}
+svg{display:block;width:100%;height:auto}
+.grid{stroke:var(--line-soft);stroke-width:1}
+.ax{font-size:9px;fill:var(--faint)}
+.f-up{fill:var(--up)}.f-down{fill:var(--down)}.s-up{stroke:var(--up)}.s-down{stroke:var(--down)}
+.l-ma20{fill:none;stroke:var(--ma20);stroke-width:1.4}
+.l-ma120{fill:none;stroke:var(--ma120);stroke-width:1.4;stroke-dasharray:4 3}
+.l-ink{fill:none;stroke:var(--ink);stroke-width:1.4}
+.l-acc{fill:none;stroke:var(--accent);stroke-width:1.4}
+.l-up{fill:none;stroke:var(--up);stroke-width:1.3}.l-down{fill:none;stroke:var(--down);stroke-width:1.3}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-top:6px}
+.legend i{display:inline-block;width:14px;border-top:2px solid;vertical-align:middle;margin-right:4px}
+
+table.t{width:100%;border-collapse:collapse;font-size:13px}
+.t th{font-weight:500;color:var(--faint);font-size:11px;text-align:right;padding:5px 6px;border-bottom:1px solid var(--line)}
+.t td{text-align:right;padding:6px 6px;border-bottom:1px solid var(--line-soft);white-space:nowrap}
+.t th:first-child,.t td:first-child{text-align:left;padding-left:0}
+.t td:first-child small{color:var(--faint);margin-left:6px;font-size:11px}
+.t tr:last-child td{border-bottom:0}
+.spark{width:96px}
+
+/* Lamps */
+.lamps{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid var(--line);border-radius:4px}
+.lamp{background:transparent;border:0;padding:12px 10px;text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:6px}
+.lamp+.lamp{border-left:1px solid var(--line)}
+.lamp[aria-expanded="true"]{background:var(--raised)}
+.bulb{width:12px;height:12px;border-radius:50%;border:1.5px solid var(--faint)}
+.bulb.on{background:var(--accent);border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
+.bulb.na{border-style:dashed}
+.lamp b{font-size:13px;font-weight:600}
+.lamp small{font-size:11px;color:var(--muted);line-height:1.35}
+.verdict{display:flex;align-items:baseline;gap:12px;margin:12px 0 0}
+.verdict .big{color:var(--accent)}
+.detail{border:1px solid var(--line);border-top:0;border-radius:0 0 4px 4px;padding:12px;background:var(--raised);font-size:13px}
+.detail p{margin:4px 0 0;color:var(--muted)}
+
+/* News */
+.news{list-style:none;margin:0;padding:0}
+.news li{padding:9px 0;border-bottom:1px solid var(--line-soft)}
+.news li:last-child{border-bottom:0}
+.news a{text-decoration:none;font-size:13px;line-height:1.45;display:block}
+.news a:hover{text-decoration:underline}
+.news small{display:block;color:var(--faint);font-size:11px;margin-top:3px}
+.empty{color:var(--faint);font-size:12px}
+
+/* Desktop */
+.desk{max-width:1280px;margin:0 auto;padding:22px 20px 40px}
+.cols{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:40px}
+.cols.even{grid-template-columns:repeat(2,minmax(0,1fr))}
+.dash{border:0;border-top:1px dashed var(--line);margin:26px 0}
+.solid{border:0;border-top:1px solid var(--line);margin:30px 0 18px}
+.fx-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 260px;gap:32px;align-items:start}
+.legal{font-size:11.5px;color:var(--muted);line-height:1.7}
+.legal h2{font-size:12px;color:var(--ink);margin:0 0 6px;font-weight:600}
+.legal ol{margin:0;padding-left:18px}
+.legal .src{color:var(--faint);margin-top:8px}
+
+/* Mobile */
+.mob{display:none}
+@media (max-width:899px){
+  .desk{display:none}
+  .mob{display:block}
+  .bar{padding-left:14px;padding-right:14px}
+  .bar h1{font-size:14px}
+  .bar .stamp{font-size:11px;line-height:1.3}
+  #btn-refresh{display:none}
+}
+.tabs{position:sticky;top:var(--bar-h,52px);z-index:4;display:grid;grid-template-columns:repeat(4,1fr);background:var(--bg);border-bottom:1px solid var(--line);padding:8px 14px}
+.tabs button{background:transparent;border:1px solid var(--line);padding:7px 0;font-size:13px;cursor:pointer;color:var(--muted)}
+.tabs button:first-child{border-radius:4px 0 0 4px}
+.tabs button:last-child{border-radius:0 4px 4px 0}
+.tabs button+button{border-left:0}
+.tabs button[aria-selected="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+.pane{padding:16px 14px 8px}
+.mob .lamps{grid-template-columns:repeat(4,1fr)}
+.mob .lamp{align-items:center;text-align:center;padding:10px 4px}
+.mob .lamp small{display:none}
+.mob .legal{padding:0 14px 30px}
+.mob .solid{margin:10px 14px 16px}
+
+/* Dialogs */
+dialog{border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);padding:0;width:min(420px,calc(100vw - 32px));max-height:calc(100vh - 80px)}
+dialog::backdrop{background:rgba(0,0,0,.55)}
+.dlg-h{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
+.dlg-h h2{font-size:14px;margin:0;font-weight:600}
+.dlg-b{padding:14px 16px;overflow:auto;max-height:calc(100vh - 170px);font-size:13.5px;line-height:1.65}
+.dlg-b p{margin:0 0 10px}
+.dlg-src{padding:10px 16px 12px;border-top:1px solid var(--line-soft);color:var(--faint);font-size:11px}
+.seg{display:inline-grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:4px;overflow:hidden}
+.seg button{background:transparent;border:0;padding:6px 18px;cursor:pointer;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);font-weight:600}
+.row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--line-soft)}
+.terms{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.terms button{background:var(--raised);border:1px solid var(--line);border-radius:4px;padding:9px 10px;text-align:left;cursor:pointer;font-size:13px}
+.terms button:hover{border-color:var(--muted)}
+.wide-btn{width:100%;background:transparent;border:1px solid var(--line);border-radius:4px;padding:10px;cursor:pointer;text-align:left;margin-top:12px}
+</style>
+</head>
+<body>
+<header class="bar" id="bar">
+  <h1>台股止跌訊號</h1>
+  <div class="stamp" id="stamp">讀取中</div>
+  <button class="icon-btn" id="btn-refresh" type="button">重新整理</button>
+  <button class="icon-btn" id="btn-settings" type="button" aria-haspopup="dialog">設定</button>
+</header>
+<div class="warn" id="warn" hidden></div>
+
+<main class="desk" id="desk" aria-label="電腦版"></main>
+<main class="mob" id="mob" aria-label="手機版"></main>
+
+<dialog id="dlg-settings" aria-labelledby="dlg-settings-t">
+  <div class="dlg-h"><h2 id="dlg-settings-t">設定</h2><button class="icon-btn" data-close type="button">關閉</button></div>
+  <div class="dlg-b">
+    <div class="row"><span>外觀</span>
+      <div class="seg" role="group" aria-label="外觀">
+        <button type="button" data-theme-set="dark">深色</button><button type="button" data-theme-set="light">淺色</button>
+      </div>
+    </div>
+    <button class="wide-btn" type="button" id="btn-glossary">簡易股票說明</button>
+  </div>
+</dialog>
+
+<dialog id="dlg-glossary" aria-labelledby="dlg-glossary-t">
+  <div class="dlg-h"><h2 id="dlg-glossary-t">簡易股票說明</h2><button class="icon-btn" data-close type="button">關閉</button></div>
+  <div class="dlg-b"><div class="terms" id="terms"></div></div>
+</dialog>
+
+<dialog id="dlg-term" aria-labelledby="dlg-term-t">
+  <div class="dlg-h"><h2 id="dlg-term-t"></h2><button class="icon-btn" data-close type="button">關閉</button></div>
+  <div class="dlg-b" id="term-body"></div>
+  <div class="dlg-src" id="term-src"></div>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>
