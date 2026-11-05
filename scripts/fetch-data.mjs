@@ -1,6 +1,7 @@
 // 由 GitHub Actions 定時執行：抓取證交所與 Yahoo Finance 資料，輸出 data/latest.json 供網頁讀取。
 // 需求：Node.js 20 以上（內建 fetch）。本機測試：node scripts/fetch-data.mjs
 import fs from "node:fs/promises";
+import fssync from "node:fs";
 
 const CFG = {
   FOREIGN_CALM: 200,   // 外資每日賣超小於此值（億元）視為收斂
@@ -191,7 +192,7 @@ async function twseIntraday(date) {
   const msgs = [];
   for (const u of urls) {
     try {
-      const j = await getJSON(u, 60000);
+      const j = await getJSON(u, 45000);
       if (j && j.stat && j.stat !== "OK") { msgs.push(String(j.stat).slice(0, 40)); continue; }
       const tables = [];
       if (Array.isArray(j.data)) tables.push({ fields: j.fields || [], data: j.data });
@@ -456,6 +457,8 @@ async function fetchTwTop() {
 async function watchTop(list, label) {
   const out = [], failed = [];
   for (const [sym, name] of list) {
+    const q = CQ[sym];
+    if (q) { out.push({ sym, name, src: "CNBC", close: q.last, changePct: q.changePct, value: q.volume ? q.last * q.volume : 0, date: q.date }); continue; }
     try {
       const tries = [];
       if (yFails < 3) tries.push(["Yahoo Finance", () => yahoo(sym, "5d")]);
@@ -552,8 +555,93 @@ async function fetchNews(cfg, region) {
   return v;
 }
 
-/* ---------- 盤中模式：只更新加權指數今日走勢 ---------- */
+/* ---------- CNBC 報價（非官方介面，不需金鑰；只取當下報價，走勢由本工具自行累積） ---------- */
+const CNBC_SYM = { "^GSPC": ".SPX", "^IXIC": ".IXIC", "^SOX": ".SOX", "^VIX": ".VIX", "^N225": ".N225", "TSM": "TSM" };
+const cnbcSym = s => CNBC_SYM[s] || (/\.T$/.test(s) ? s.replace(/\.T$/, "-JP") : s);
+const INTRA_SYMS = ["^GSPC", "^SOX", "^IXIC", "TSM", "^N225"];
+function findQuotes(obj, out = []) {
+  if (Array.isArray(obj)) obj.forEach(x => findQuotes(x, out));
+  else if (obj && typeof obj === "object") {
+    if (typeof obj.symbol === "string" && obj.last != null) out.push(obj);
+    else Object.values(obj).forEach(v => findQuotes(v, out));
+  }
+  return out;
+}
+function field(o, names) { for (const k of names) if (o[k] != null && o[k] !== "") return o[k]; return null; }
+async function cnbcQuotes(syms) {
+  const res = {}, msgs = [];
+  const want = syms.map(s => [s, cnbcSym(s)]);
+  for (let i = 0; i < want.length; i += 20) {
+    const chunk = want.slice(i, i + 20), q = encodeURIComponent(chunk.map(x => x[1]).join("|"));
+    const urls = [
+      `https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=${q}&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json&events=1`,
+      `https://quote.cnbc.com/quote-html-webservice/quote.htm?partnerId=2&requestMethod=quick&exthrs=1&noform=1&fund=1&output=json&symbols=${q}`,
+    ];
+    let quotes = [];
+    for (const u of urls) {
+      try { quotes = findQuotes(await getJSON(u, 20000)); if (quotes.length) break; msgs.push("回應中沒有報價"); }
+      catch (e) { msgs.push(errText(e)); }
+    }
+    for (const [mine, theirs] of chunk) {
+      const o = quotes.find(x => String(x.symbol).toUpperCase() === theirs.toUpperCase());
+      if (!o) continue;
+      const last = toNum(field(o, ["last", "last_price"]));
+      if (last == null || last <= 0) continue;
+      const lt = String(field(o, ["last_time", "lastTime", "last_timedate"]) || "");
+      const m = lt.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
+      const prevClose = toNum(field(o, ["previous_day_closing", "previousDayClosing", "prev_close"]));
+      let chgPct = toNum(String(field(o, ["change_pct", "changePct", "change_percent"]) || "").replace("%", ""));
+      chgPct = chgPct != null ? chgPct / 100 : (prevClose ? last / prevClose - 1 : null);
+      res[mine] = { last, changePct: chgPct, change: toNum(field(o, ["change"])), prevClose, volume: toNum(field(o, ["volume"])),
+        date: m ? m[1] : tpeToday(), t: m ? m[2] : null, name: field(o, ["name", "onAirName"]) };
+    }
+    await sleep(300);
+  }
+  if (!Object.keys(res).length) throw new Error(msgs.join("；") || "無報價");
+  return res;
+}
+// 記錄每日收盤與盤中取樣，供走勢圖使用
+function recordQuotes(qs) {
+  cache.cq = cache.cq || {};
+  for (const [sym, q] of Object.entries(qs)) {
+    const e = cache.cq[sym] = cache.cq[sym] || { daily: {}, intra: {} };
+    e.daily[q.date] = q.last;
+    if (q.prevClose) e.prev = { ...(e.prev || {}), [q.date]: q.prevClose };
+    if (q.t && INTRA_SYMS.includes(sym)) {
+      const day = e.intra[q.date] = e.intra[q.date] || [];
+      if (!day.some(p => p.t === q.t)) day.push({ t: q.t, v: q.last });
+      day.sort((a, b) => (a.t < b.t ? -1 : 1));
+    }
+    for (const d of Object.keys(e.daily)) if (d < addDays(q.date, -200)) delete e.daily[d];
+    for (const d of Object.keys(e.intra)) if (d < addDays(q.date, -4)) delete e.intra[d];
+    for (const d of Object.keys(e.prev || {})) if (d < addDays(q.date, -10)) delete e.prev[d];
+  }
+}
+function cnbcBars(sym) {
+  const e = cache.cq && cache.cq[sym]; if (!e) return [];
+  return Object.keys(e.daily).sort().map(d => ({ date: d, c: e.daily[d] }));
+}
+function cnbcIntraday(sym) {
+  const e = cache.cq && cache.cq[sym]; if (!e || !e.intra) return null;
+  const d = Object.keys(e.intra).sort().at(-1);
+  const pts = d ? e.intra[d] : [];
+  if (!pts || pts.length < 2) return null;
+  return { date: d, points: pts, prevClose: e.prev && e.prev[d] ? e.prev[d] : null, src: "CNBC（約每 15 分鐘取樣）", live: true };
+}
+// 若報價日期比歷史資料新，補上最新一筆
+function withQuote(bars, q) {
+  if (!q) return bars;
+  const last = bars.at(-1);
+  if (!last || q.date > last.date) return bars.concat([{ date: q.date, c: q.last }]);
+  if (q.date === last.date) return bars.slice(0, -1).concat([{ ...last, c: q.last }]);
+  return bars;
+}
+
+/* ---------- 盤中模式：台股、日股、美股的今日走勢取樣 ---------- */
 if (process.argv.includes("--intraday")) {
+  let latest = null;
+  try { latest = JSON.parse(await fs.readFile(OUT_PATH, "utf8")); } catch {}
+  // 台股（證交所即時行情）
   try {
     const p = await misIndexNow();
     cache.intra = cache.intra || {};
@@ -563,33 +651,77 @@ if (process.argv.includes("--intraday")) {
     day.points.sort((a, b) => (a.t < b.t ? -1 : 1));
     if (p.prevClose) day.prevClose = p.prevClose;
     cache.intra[p.date] = day;
-    let latest = null;
-    try { latest = JSON.parse(await fs.readFile(OUT_PATH, "utf8")); } catch {}
     if (latest && latest.tw) {
       const cur = latest.tw.intraday;
-      // 已有證交所完整盤後資料時不覆蓋
-      if (!(cur && cur.date === p.date && cur.src === "臺灣證券交易所")) {
+      if (!(cur && cur.date === p.date && cur.src === "臺灣證券交易所") && day.points.length > 1) {
         latest.tw.intraday = { date: p.date, points: day.points, prevClose: day.prevClose, src: "臺灣證券交易所即時行情（約每 10 分鐘）", live: true };
-        latest.intradayAt = new Date().toISOString();
-        await fs.writeFile(OUT_PATH, JSON.stringify(latest));
       }
     }
-    await fs.writeFile(CACHE_PATH, JSON.stringify(cache));
-    console.log(`盤中更新：${p.date} ${p.t} ${p.v}`);
-  } catch (e) { console.log("盤中更新失敗：" + errText(e)); }
+    console.log(`台股盤中：${p.date} ${p.t} ${p.v}`);
+  } catch (e) { console.log("台股盤中取樣失敗：" + errText(e)); }
+  // 美股與日經（CNBC）
+  try {
+    const qs = await cnbcQuotes(INTRA_SYMS);
+    recordQuotes(qs);
+    if (latest) {
+      (latest.us || []).forEach(u => {
+        const q = qs[u.sym]; if (!q) return;
+        u.last = q.last; u.change = q.changePct; u.date = q.date; u.src = "CNBC";
+        u.bars = withQuote(u.bars || [], q);
+        const it = cnbcIntraday(u.sym); if (it) u.intraday = it;
+      });
+      if (latest.jp && qs["^N225"]) {
+        const q = qs["^N225"], j = latest.jp;
+        j.index.last = q.last; j.index.change = q.changePct; j.index.date = q.date; j.src = "CNBC";
+        j.index.bars = withQuote(j.index.bars || [], q);
+        const it = cnbcIntraday("^N225"); if (it) j.intraday = it;
+      }
+    }
+    console.log("美日盤中：" + Object.keys(qs).join(", "));
+  } catch (e) { console.log("美日盤中取樣失敗：" + errText(e)); }
+  if (latest) { latest.intradayAt = new Date().toISOString(); await fs.writeFile(OUT_PATH, JSON.stringify(latest)); }
+  await fs.writeFile(CACHE_PATH, JSON.stringify(cache));
   process.exit(0);
 }
 
 /* ---------- 收集 ---------- */
+// 安全網：若中途發生未預期的錯誤，仍寫出已取得的資料
+let outRef = null;
+function emergencyWrite(err) {
+  try {
+    if (outRef) {
+      outRef.errors = errors.concat(["程式中斷：" + errText(err)]);
+      fssync.writeFileSync(OUT_PATH, JSON.stringify(outRef));
+      fssync.writeFileSync(CACHE_PATH, JSON.stringify(cache));
+    }
+  } catch {}
+  console.log("程式中斷：" + errText(err));
+  process.exit(0);
+}
+process.on("uncaughtException", emergencyWrite);
+process.on("unhandledRejection", emergencyWrite);
 let prevOut = null;
 try { prevOut = JSON.parse(await fs.readFile(OUT_PATH, "utf8")); } catch {}
 const out = {
-  version: "2026-11-05d",
+  version: "2026-11-05f",
   updatedAt: new Date().toISOString(), asOf: null,
   tw: null, taifex: null, twTop: null, foreign: [], margin: null, marginPeak: null,
   us: [], usTop: [], jp: null, jpTop: [], fx: null, news: { tw: [], us: [], jp: [], fx: [] }, signals: [],
   config: { foreignCalm: CFG.FOREIGN_CALM, marginRatio: CFG.MARGIN_RATIO },
 };
+outRef = out;
+
+// 新聞優先抓取（台灣 → 美國 → 日本 → 匯率），避免後段步驟耗時影響
+for (const k of ["tw", "us", "jp", "fx"]) {
+  try { out.news[k] = await fetchNews(CFG.NEWS[k], k); } catch (e) { errors.push(`新聞（${k}）：${errText(e)}`); }
+}
+
+// CNBC 報價：一次取得美股、日股所需的報價
+let CQ = {};
+try {
+  CQ = await cnbcQuotes([...new Set([...CFG.US.map(x => x.sym).filter(x => x !== "^TNX"), "^N225", ...CFG.US_WATCH.map(x => x[0]), ...CFG.JP_WATCH.map(x => x[0])])]);
+  recordQuotes(CQ);
+} catch (e) { errors.push("CNBC 報價：" + errText(e)); }
 
 // 加權指數（優先使用證交所官方資料）
 try {
@@ -642,21 +774,25 @@ out.foreign = await series("f", fetchForeign, CFG.FOREIGN_DAYS);
 const US_FRED = { "^GSPC": "SP500", "^IXIC": "NASDAQCOM", "^TNX": "DGS10", "^VIX": "VIXCLS" };
 for (const it of CFG.US) {
   try {
-    const tries = [["Yahoo Finance", () => yahoo(it.sym, "3mo")]];
-    if (US_FRED[it.sym]) tries.push(["FRED", () => fred(US_FRED[it.sym], 120)]);
-    if (STOOQ_KEY && it.sym !== "^TNX") tries.push(["Stooq", () => stooq(it.sym, 90)]);
-    const { v: bars, src } = await firstOk(it.name, tries);
+    const q = CQ[it.sym];
+    const tries = [["Yahoo Finance", () => yahoo(it.sym, "6mo")]];
+    if (US_FRED[it.sym]) tries.push(["FRED", () => fred(US_FRED[it.sym], 200)]);
+    if (q) tries.push(["CNBC", async () => { const b = cnbcBars(it.sym); if (!b.length) throw new Error("無資料"); return b; }]);
+    if (STOOQ_KEY && it.sym !== "^TNX") tries.push(["Stooq", () => stooq(it.sym, 200)]);
+    let { v: bars, src } = await firstOk(it.name, tries);
+    bars = withQuote(bars, q);
     const n = bars.length, last = bars[n - 1], prev = n > 1 ? bars[n - 2] : null;
-    const item = { ...it, src, bars: bars.slice(-70).map(b => ({ date: b.date, c: b.c })), last: last.c, date: last.date,
-      change: prev ? pctChg(last.c, prev.c) : null, diff: prev ? round(last.c - prev.c, 3) : null };
-    if (["^GSPC", "^SOX", "^IXIC", "TSM"].includes(it.sym)) {
+    const item = { ...it, src: q && src !== "CNBC" ? src + "＋CNBC" : src, bars: bars.slice(-130).map(b => ({ date: b.date, c: b.c })), last: last.c, date: last.date,
+      change: q && q.date === last.date && q.changePct != null ? q.changePct : (prev ? pctChg(last.c, prev.c) : null), diff: prev ? round(last.c - prev.c, 3) : null };
+    if (INTRA_SYMS.includes(it.sym)) {
       try {
         const { v: intra, src: isrc } = await firstOk(it.name + "今日走勢", [
+          ["CNBC 取樣", async () => { const x = cnbcIntraday(it.sym); if (!x) throw new Error("盤中取樣尚未累積"); return x; }],
           ["Yahoo Finance", () => yahooIntraday(it.sym)],
           ["Stooq", () => stooqIntraday(it.sym, "America/New_York")],
         ]);
-        const pc = bars.filter(b => b.date < intra.date).at(-1);
-        item.intraday = { ...intra, src: isrc, prevClose: pc ? pc.c : null };
+        const pc = intra.prevClose || (bars.filter(b => b.date < intra.date).at(-1) || {}).c || null;
+        item.intraday = { ...intra, src: intra.src || isrc, prevClose: pc };
       } catch (e) { errors.push(it.name + "今日走勢：" + errText(e)); }
     }
     out.us.push(item);
@@ -668,20 +804,23 @@ out.usTop = await watchTop(CFG.US_WATCH, "美股重點股");
 // 日股
 try {
   const { v: nb, src } = await firstOk("日經 225", [["Yahoo Finance", () => yahoo("^N225", "6mo")], ["Stooq", () => stooq("^N225", 200)], ["FRED", () => fred("NIKKEI225", 200)]]);
+  const nq = CQ["^N225"];
+  let nb2 = withQuote(nb.map(b => ({ date: b.date, c: b.c })), nq);
   const { v: jb } = await firstOk("美元兌日圓", [["Yahoo Finance", () => yahoo("JPY=X", "1mo")], ["FRED", () => fred("DEXJPUS", 60)]]);
-  const n = nb.length, k = jb.length;
+  const n = nb2.length, k = jb.length;
   out.jp = {
-    src,
-    index: { name: "日經 225", last: nb[n - 1].c, date: nb[n - 1].date, change: n > 1 ? pctChg(nb[n - 1].c, nb[n - 2].c) : null, bars: nb.slice(-130).map(b => ({ date: b.date, c: b.c })) },
+    src: nq ? src + "＋CNBC" : src,
+    index: { name: "日經 225", last: nb2[n - 1].c, date: nb2[n - 1].date, change: nq && nq.date === nb2[n - 1].date && nq.changePct != null ? nq.changePct : (n > 1 ? pctChg(nb2[n - 1].c, nb2[n - 2].c) : null), bars: nb2.slice(-130) },
     usdjpy: { last: jb[k - 1].c, change: k > 1 ? pctChg(jb[k - 1].c, jb[k - 2].c) : null, bars: jb.slice(-22).map(b => ({ date: b.date, c: b.c })) },
   };
   try {
     const { v: it, src: isrc } = await firstOk("日經 225 今日走勢", [
+      ["CNBC 取樣", async () => { const x = cnbcIntraday("^N225"); if (!x) throw new Error("盤中取樣尚未累積"); return x; }],
       ["Yahoo Finance", () => yahooIntraday("^N225")],
       ["Stooq", () => stooqIntraday("^N225", "Asia/Tokyo")],
     ]);
-    const prev = nb.filter(b => b.date < it.date).at(-1);
-    out.jp.intraday = { ...it, src: isrc, prevClose: prev ? prev.c : null };
+    const prev = nb2.filter(b => b.date < it.date).at(-1);
+    out.jp.intraday = { ...it, src: it.src || isrc, prevClose: it.prevClose || (prev ? prev.c : null) };
   } catch (e) { errors.push("日經 225 今日走勢：" + errText(e)); }
 } catch (e) { errors.push("日股指數：" + errText(e)); }
 out.jpTop = await watchTop(CFG.JP_WATCH, "日股熱門股");
@@ -724,10 +863,7 @@ try {
   }
 } catch (e) { errors.push("匯率：" + errText(e)); }
 
-// 新聞（台灣 → 美國 → 日本 → 匯率）
-for (const k of ["tw", "us", "jp", "fx"]) {
-  try { out.news[k] = await fetchNews(CFG.NEWS[k], k); } catch (e) { errors.push(`新聞（${k}）：${errText(e)}`); }
-}
+
 
 /* ---------- 本次未取得的項目，沿用上次成功的結果 ---------- */
 const stale = [];
