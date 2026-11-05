@@ -51,7 +51,7 @@ const tpeToday = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 
 const ymd = s => s.replace(/-/g, "");
 const addDays = (s, n) => { const d = new Date(s + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
 const isWeekend = s => [0, 6].includes(new Date(s + "T00:00:00Z").getUTCDay());
-const toNum = x => { if (x == null) return null; const n = Number(String(x).replace(/,/g, "").trim()); return Number.isNaN(n) ? null : n; };
+const toNum = x => { if (x == null) return null; const t = String(x).replace(/,/g, "").trim(); if (t === "" || t === "." || /^-+$/.test(t)) return null; const n = Number(t); return Number.isFinite(n) ? n : null; };
 const round = (n, d = 2) => (n == null || !Number.isFinite(Number(n)) ? null : Math.round(Number(n) * 10 ** d) / 10 ** d);
 // 錯誤訊息只保留前 120 字，避免把外部網站的回應內容寫進公開資料檔
 const errText = e => String(e && e.message ? e.message : e).replace(/\s+/g, " ").slice(0, 120);
@@ -146,9 +146,9 @@ async function yahooAuth() {
   } catch {}
   return yAuth;
 }
-async function yahoo(sym, range) {
+async function yahoo(sym, range, interval = "1d") {
   if (yFails >= 3) throw new Error("暫時無法連線");
-  const path = `/v8/finance/chart/${encodeURIComponent(sym)}?range=${range}&interval=1d`;
+  const path = `/v8/finance/chart/${encodeURIComponent(sym)}?range=${range}&interval=${interval}`;
   let j;
   try { j = await getJSON("https://query1.finance.yahoo.com" + path); }
   catch (e1) {
@@ -163,10 +163,50 @@ async function yahoo(sym, range) {
   const map = {};
   (res.timestamp || []).forEach((t, i) => {
     if (q.close[i] == null || !Number.isFinite(q.close[i])) return;
-    const date = new Date((t + off) * 1000).toISOString().slice(0, 10);
-    map[date] = { date, o: round(q.open[i]), h: round(q.high[i]), l: round(q.low[i]), c: round(q.close[i], 4), v: q.volume ? q.volume[i] : null };
+    const iso = new Date((t + off) * 1000).toISOString();
+    const date = iso.slice(0, 10), key = interval === "1d" ? date : iso.slice(0, 16);
+    map[key] = { date, t: iso.slice(11, 16), o: round(q.open[i]), h: round(q.high[i]), l: round(q.low[i]), c: round(q.close[i], 4), v: q.volume ? q.volume[i] : null };
   });
-  return Object.values(map).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const arr = Object.values(map).sort((a, b) => ((a.date + a.t) < (b.date + b.t) ? -1 : 1));
+  if (interval === "1d") arr.forEach(b => delete b.t);
+  return arr;
+}
+
+// 盤中走勢：Yahoo 5 分鐘線，只保留最後一個交易日
+async function yahooIntraday(sym) {
+  const pts = await yahoo(sym, "1d", "5m");
+  if (!pts.length) throw new Error("無盤中資料");
+  const day = pts.at(-1).date;
+  return { date: day, points: pts.filter(p => p.date === day).map(p => ({ t: p.t, v: p.c })) };
+}
+
+// 證交所：每 5 秒指數統計，取加權指數並整理為每分鐘一點
+async function twseIntraday(date) {
+  const urls = [
+    `https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_INDEX?date=${ymd(date)}&response=json`,
+    `https://www.twse.com.tw/exchangeReport/MI_5MINS_INDEX?response=json&date=${ymd(date)}`,
+  ];
+  let lastErr;
+  for (const u of urls) {
+    try {
+      const j = await getJSON(u);
+      if (j && j.stat && j.stat !== "OK") throw new Error("當日無資料");
+      const tbl = Array.isArray(j.data) ? { fields: j.fields || [], data: j.data } : (j.tables || []).find(t => Array.isArray(t.data) && t.data.length) || { fields: [], data: [] };
+      let ci = (tbl.fields || []).findIndex(f => String(f).includes("發行量加權股價指數"));
+      if (ci < 0) ci = 1;
+      const byMin = {};
+      tbl.data.forEach(r => {
+        const t = String(r[0] || "").trim();
+        if (!/^\d{2}:\d{2}(:\d{2})?$/.test(t)) return;
+        const v = toNum(r[ci]); if (v == null || v <= 0) return;
+        byMin[t.slice(0, 5)] = v;
+      });
+      const points = Object.keys(byMin).sort().map(t => ({ t, v: byMin[t] }));
+      if (points.length < 10) throw new Error("盤中資料不足");
+      return { date, points };
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
 }
 
 // 美國聯準會經濟資料庫（FRED）：官方公開資料，不需金鑰；作為 Yahoo 無法使用時的備援
@@ -175,7 +215,7 @@ async function fred(id, days = 400) {
   const r = await fetch(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=${id}&cosd=${from}`, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20000) });
   if (!r.ok) throw new Error(`FRED HTTP ${r.status}`);
   const lines = (await r.text()).trim().split(/\r?\n/).slice(1);
-  const bars = lines.map(l => { const [d, v] = l.split(","); return { date: d, c: toNum(v) }; }).filter(b => /^\d{4}-\d{2}-\d{2}$/.test(b.date) && b.c != null);
+  const bars = lines.map(l => { const [d, v] = l.split(","); return { date: d, c: toNum(v) }; }).filter(b => /^\d{4}-\d{2}-\d{2}$/.test(b.date) && b.c != null && b.c > 0);
   if (!bars.length) throw new Error("FRED 無資料");
   return bars;
 }
@@ -239,7 +279,7 @@ async function taifexFxLatest() {
   return rows.map(r => {
     let d = String(r[kDate] || ""); if (/^\d{8}$/.test(d)) d = `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}`; else d = d.replace(/\//g, "-");
     return { date: d, c: toNum(r[kUsd]) };
-  }).filter(b => /^\d{4}-\d{2}-\d{2}$/.test(b.date) && b.c != null);
+  }).filter(b => /^\d{4}-\d{2}-\d{2}$/.test(b.date) && b.c != null && b.c > 0);
 }
 function mergeBars(a, b) { const m = {}; a.concat(b).forEach(x => { m[x.date] = x; }); return Object.values(m).sort((x, y) => (x.date < y.date ? -1 : 1)); }
 
@@ -384,6 +424,13 @@ try {
   const n = bars.length;
   out.tw = { src, bars: bars.slice(-60).map(({ v, ...b }) => b), ma20: ma20.slice(-60), ma120: ma120.slice(-60), last: bars[n - 1], change: n > 1 ? pctChg(bars[n - 1].c, bars[n - 2].c) : null, peak };
   out.asOf = bars[n - 1].date;
+  try {
+    const { v: intra, src: isrc } = await firstOk("加權指數盤中", [
+      ["臺灣證券交易所", () => twseIntraday(out.asOf)],
+      ["Yahoo Finance", () => yahooIntraday("^TWII")],
+    ]);
+    out.tw.intraday = { ...intra, src: isrc, prevClose: n > 1 ? bars[n - 2].c : null };
+  } catch (e) { errors.push("加權指數今日走勢：" + errText(e)); }
 } catch (e) { errors.push("加權指數：" + errText(e)); }
 
 try { out.taifex = await fetchTaifex(); } catch (e) { errors.push("台指期：" + errText(e)); }
@@ -416,14 +463,19 @@ if (yFails >= 3) errors.push("美股熱門股：Yahoo Finance 暫時無法連線
 
 // 日股
 try {
-  const { v: nb, src } = await firstOk("日經 225", [["Yahoo Finance", () => yahoo("^N225", "3mo")], ["FRED", () => fred("NIKKEI225", 120)]]);
+  const { v: nb, src } = await firstOk("日經 225", [["Yahoo Finance", () => yahoo("^N225", "6mo")], ["FRED", () => fred("NIKKEI225", 200)]]);
   const { v: jb } = await firstOk("美元兌日圓", [["Yahoo Finance", () => yahoo("JPY=X", "1mo")], ["FRED", () => fred("DEXJPUS", 60)]]);
   const n = nb.length, k = jb.length;
   out.jp = {
     src,
-    index: { name: "日經 225", last: nb[n - 1].c, date: nb[n - 1].date, change: n > 1 ? pctChg(nb[n - 1].c, nb[n - 2].c) : null, bars: nb.slice(-60).map(({ v, ...b }) => b) },
+    index: { name: "日經 225", last: nb[n - 1].c, date: nb[n - 1].date, change: n > 1 ? pctChg(nb[n - 1].c, nb[n - 2].c) : null, bars: nb.slice(-130).map(b => ({ date: b.date, c: b.c })) },
     usdjpy: { last: jb[k - 1].c, change: k > 1 ? pctChg(jb[k - 1].c, jb[k - 2].c) : null, bars: jb.slice(-22).map(b => ({ date: b.date, c: b.c })) },
   };
+  try {
+    const it = await yahooIntraday("^N225");
+    const prev = nb.filter(b => b.date < it.date).at(-1);
+    out.jp.intraday = { ...it, src: "Yahoo Finance", prevClose: prev ? prev.c : null };
+  } catch (e) { errors.push("日經 225 今日走勢：" + errText(e)); }
 } catch (e) { errors.push("日股指數：" + errText(e)); }
 out.jpTop = yFails >= 3 ? [] : await watchTop(CFG.JP_WATCH);
 if (yFails >= 3) errors.push("日股熱門股：Yahoo Finance 暫時無法連線");
@@ -439,7 +491,7 @@ try {
       return mergeBars(hist, latest);
     }],
   ]);
-  const bars = raw.map(b => ({ date: b.date, c: b.c }));
+  const bars = raw.filter(b => b.c != null && b.c > 0).map(b => ({ date: b.date, c: b.c }));
   const rets = bars.map((b, i) => (i ? Math.log(b.c / bars[i - 1].c) : null));
   const vol = bars.map((_, i) => {
     if (i < 20) return null;
@@ -453,8 +505,8 @@ try {
   const pctRank = cur != null && valid.length ? valid.filter(v => v <= cur).length / valid.length : null;
   out.fx = {
     src,
-    usdtwd: { last: bars.at(-1).c, date: bars.at(-1).date, change: bars.length > 1 ? pctChg(bars.at(-1).c, bars.at(-2).c) : null, bars: bars.slice(-120) },
-    vol: { current: cur, avg: valid.length ? round(valid.reduce((a, b) => a + b, 0) / valid.length, 2) : null, max: valid.length ? Math.max(...valid) : null, rank: pctRank, series: vol.slice(-120) },
+    usdtwd: { last: bars.at(-1).c, date: bars.at(-1).date, change: bars.length > 1 ? pctChg(bars.at(-1).c, bars.at(-2).c) : null, bars: bars.slice(-130) },
+    vol: { current: cur, avg: valid.length ? round(valid.reduce((a, b) => a + b, 0) / valid.length, 2) : null, max: valid.length ? Math.max(...valid) : null, rank: pctRank, series: vol.slice(-130) },
     others: [],
   };
   for (const [sym, name, fid, inv] of [["JPY=X", "美元兌日圓", "DEXJPUS"], ["EURUSD=X", "歐元兌美元", "DEXUSEU"], ["CNY=X", "美元兌人民幣", "DEXCHUS"]]) {
