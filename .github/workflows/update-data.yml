@@ -32,6 +32,7 @@ jobs:
       - name: 抓取資料
         env:
           MODE: ${{ (github.event.schedule == '*/10 1-5 * * 1-5' || github.event.schedule == '35 5 * * 1-5') && '--intraday' || '' }}
+          STOOQ_APIKEY: ${{ secrets.STOOQ_APIKEY }}  # 選用：未設定時自動略過
         run: node scripts/fetch-data.mjs $MODE
       - name: 提交更新
         run: |
