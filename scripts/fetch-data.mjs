@@ -243,6 +243,23 @@ async function fred(id, days = 400) {
   return bars;
 }
 
+// Stooq：需要免費金鑰（存放在 GitHub Secrets 的 STOOQ_APIKEY），未設定時自動略過
+const STOOQ_KEY = (process.env.STOOQ_APIKEY || "").trim();
+const STOOQ_MAP = { "^GSPC": "^spx", "^IXIC": "^ndq", "^SOX": "^sox", "^N225": "^nkx", "^VIX": "^vix", "TSM": "tsm.us" };
+const stooqSym = s => STOOQ_MAP[s] || (/\.T$/.test(s) ? s.replace(/\.T$/, ".jp") : s.toLowerCase() + ".us");
+async function stooq(sym, days = 200) {
+  if (!STOOQ_KEY) throw new Error("未設定金鑰");
+  const d1 = ymd(addDays(tpeToday(), -days));
+  const r = await fetch(`https://stooq.com/q/d/l/?s=${encodeURIComponent(stooqSym(sym))}&d1=${d1}&i=d&apikey=${encodeURIComponent(STOOQ_KEY)}`, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20000) });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const t = (await r.text()).trim();
+  if (!/^Date,/i.test(t)) throw new Error(/limit/i.test(t) ? "已達每日查詢上限" : "無資料");
+  const bars = t.split(/\r?\n/).slice(1).map(l => { const c = l.split(","); return { date: c[0], o: toNum(c[1]), h: toNum(c[2]), l: toNum(c[3]), c: toNum(c[4]), v: toNum(c[5]) }; })
+    .filter(b => /^\d{4}-\d{2}-\d{2}$/.test(b.date) && b.c != null && b.c > 0);
+  if (!bars.length) throw new Error("無資料");
+  return bars;
+}
+
 // 證交所：加權指數每日開高低收（每月一次請求，過去月份存入快取）
 async function twseIndexMonth(ym) {
   const urls = [
@@ -328,19 +345,16 @@ async function quoteSeries(sym, range = "3mo") {
   return { bars, last: bars[n - 1], prev: n > 1 ? bars[n - 2] : null };
 }
 
-// 期交所：台指期近月（一般交易時段）
-async function fetchTaifex() {
-  const BASE = "https://openapi.taifex.com.tw";
-  let rows = null;
-  try { rows = await getJSON(BASE + "/v1/DailyMarketReportFut"); } catch {}
-  if (!Array.isArray(rows)) {
-    const sw = await getJSON(BASE + "/swagger.json");
-    const p = Object.keys(sw.paths || {}).find(k => /DailyMarketReport.*Fut/i.test(k) && !/Spread|Flx|Block/i.test(k));
-    if (!p) throw new Error("找不到期貨行情介面");
-    const bp = sw.basePath && !p.startsWith(sw.basePath) ? sw.basePath : "";
-    rows = await getJSON(BASE + bp + p);
-  }
-  if (!Array.isArray(rows) || !rows.length) throw new Error("期貨資料為空");
+// 期交所：台指期近月（日盤與夜盤）
+const TAIFEX = "https://openapi.taifex.com.tw";
+let taifexSwagger = null;
+async function taifexPaths() {
+  if (!taifexSwagger) taifexSwagger = await getJSON(TAIFEX + "/swagger.json");
+  const sw = taifexSwagger;
+  return Object.keys(sw.paths || {}).map(p => (sw.basePath && !p.startsWith(sw.basePath) ? sw.basePath : "") + p);
+}
+function pickTX(rows, wantNight) {
+  if (!Array.isArray(rows) || !rows.length) return null;
   const keys = Object.keys(rows[0]);
   const key = (re, not) => keys.find(k => re.test(k) && !(not && not.test(k)));
   const kContract = key(/^contract$|契約/i) || key(/contract/i, /month|week|date/i);
@@ -350,22 +364,139 @@ async function fetchTaifex() {
   const kChg = key(/^change$|^漲跌價$/i) || key(/change|漲跌/i, /%|percent/i);
   const kVol = key(/^volume$|成交量/i) || key(/volume/i);
   const kDate = key(/^date$|日期/i);
-  const all = rows.filter(r => String(r[kContract] ?? "").trim() === "TX" && !String(r[kMonth] ?? "").includes("/"));
   const isNight = r => kSession && /盤後|after|夜|^1$/i.test(String(r[kSession]));
-  function pick(list) {
-    list = list.filter(r => toNum(r[kLast]) != null).sort((a, b) => String(a[kMonth]).localeCompare(String(b[kMonth])));
-    const r = list[0];
-    if (!r) return null;
-    const last = toNum(r[kLast]), chg = toNum(r[kChg]);
-    let date = kDate ? String(r[kDate]) : null;
-    if (date && /^\d{8}$/.test(date)) date = `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}`;
-    return { contract: "TX", month: String(r[kMonth]).trim(), last, change: chg, changePct: chg != null && last ? chg / (last - chg) : null, volume: toNum(r[kVol]), date };
+  let list = rows.filter(r => String(r[kContract] ?? "").trim() === "TX" && !String(r[kMonth] ?? "").includes("/"));
+  if (wantNight === true) list = list.filter(isNight);
+  else if (wantNight === false) list = list.filter(r => !isNight(r));
+  list = list.filter(r => toNum(r[kLast]) != null).sort((a, b) => String(a[kMonth]).localeCompare(String(b[kMonth])));
+  const r = list[0];
+  if (!r) return null;
+  const last = toNum(r[kLast]), chg = toNum(r[kChg]);
+  let date = kDate ? String(r[kDate]) : null;
+  if (date && /^\d{8}$/.test(date)) date = `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}`;
+  return { contract: "TX", month: String(r[kMonth]).trim(), last, change: chg, changePct: chg != null && last ? chg / (last - chg) : null, volume: toNum(r[kVol]), date, hasSession: !!kSession };
+}
+async function fetchTaifex() {
+  let rows = null;
+  try { rows = await getJSON(TAIFEX + "/v1/DailyMarketReportFut"); } catch {}
+  if (!Array.isArray(rows)) {
+    const p = (await taifexPaths()).find(k => /DailyMarketReport.*Fut/i.test(k) && !/Spread|Flx|Block|AH|After|Night/i.test(k));
+    if (!p) throw new Error("找不到期貨行情介面");
+    rows = await getJSON(TAIFEX + p);
   }
-  const day = pick(all.filter(r => !isNight(r)));
+  const day = pickTX(rows, false);
   if (!day) throw new Error("找不到台指期近月資料");
-  // 夜盤（盤後交易時段 15:00 至次日 05:00），期交所於收盤後公布
-  day.night = kSession ? pick(all.filter(isNight)) : null;
+  // 夜盤（盤後交易時段 15:00 至次日 05:00）：先在同一份資料中找，找不到再找期交所的盤後專用介面
+  let night = day.hasSession ? pickTX(rows, true) : null;
+  if (!night) {
+    try {
+      const paths = (await taifexPaths()).filter(k => /Fut/i.test(k) && /AH|After|Night/i.test(k) && !/Spread|Flx|Block|Institution|Contracts/i.test(k));
+      for (const p of paths) {
+        try { night = pickTX(await getJSON(TAIFEX + p), null); } catch {}
+        if (night) break;
+      }
+      if (!night) errors.push("台指期夜盤：期交所開放資料中找不到夜盤欄位");
+    } catch (e) { errors.push("台指期夜盤：" + errText(e)); }
+  }
+  delete day.hasSession;
+  if (night) delete night.hasSession;
+  day.night = night;
   return day;
+}
+
+// 證交所：今日成交金額前 10（失敗時改用成交量前 20 名中的前 10）
+async function fetchTwTop() {
+  const rocToIso = s => { s = String(s || ""); return /^\d{7}$/.test(s) ? `${Number(s.slice(0, 3)) + 1911}-${s.slice(3, 5)}-${s.slice(5)}` : s || null; };
+  try {
+    const rows = await getJSON("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL");
+    const list = rows.map(r => ({ code: String(r.Code || "").trim(), name: String(r.Name || "").trim(), close: toNum(r.ClosingPrice), change: toNum(r.Change), value: toNum(r.TradeValue) }))
+      .filter(x => x.code && x.close && x.value);
+    if (!list.length) throw new Error("清單為空");
+    list.sort((a, b) => b.value - a.value);
+    return { basis: "成交金額", date: rocToIso(rows[0] && rows[0].Date), items: list.slice(0, 10).map(x => ({ ...x, value: round(x.value / 1e8, 1), changePct: x.change != null ? x.change / (x.close - x.change) : null })) };
+  } catch (e) {
+    const d = ymd(tpeToday());
+    const j = await getJSON(`https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX20?response=json&date=${d}`);
+    const f = j.fields || [];
+    const ix = name => f.findIndex(x => String(x).includes(name));
+    const rows = (j.data || []).slice(0, 10).map(r => {
+      const close = toNum(r[ix("收盤")]), diff = toNum(r[ix("漲跌價差")]);
+      const neg = String(r[ix("漲跌(+/-)")] || "").includes("-");
+      const change = diff == null ? null : neg ? -diff : diff;
+      return { code: String(r[ix("代號")]).trim(), name: String(r[ix("名稱")]).trim(), close, change, value: round(toNum(r[ix("成交股數")]) / 1e3, 0), changePct: change != null && close ? change / (close - change) : null };
+    });
+    return { basis: "成交量（張）", date: tpeToday(), items: rows };
+  }
+}
+
+async function watchTop(list, label) {
+  const out = [], failed = [];
+  for (const [sym, name] of list) {
+    try {
+      const tries = [];
+      if (yFails < 3) tries.push(["Yahoo Finance", () => yahoo(sym, "5d")]);
+      if (STOOQ_KEY) tries.push(["Stooq", () => stooq(sym, 15)]);
+      if (!tries.length) throw new Error("無可用來源");
+      const { v: bars, src } = await firstOk(name, tries);
+      const n = bars.length, last = bars[n - 1], prev = n > 1 ? bars[n - 2] : null;
+      out.push({ sym, name, src, close: last.c, changePct: prev ? pctChg(last.c, prev.c) : null, value: last.v ? last.c * last.v : 0, date: last.date });
+    } catch (e) { failed.push(name); }
+    await sleep(150);
+  }
+  if (failed.length) errors.push(`${label}：${failed.length === list.length ? "全部" : failed.join("、")}未取得${STOOQ_KEY ? "" : "（Yahoo 拒絕連線，且未設定 Stooq 金鑰）"}`);
+  return out.sort((a, b) => b.value - a.value).slice(0, 10);
+}
+
+function decodeXml(s) {
+  return String(s || "").replace(/^<!\[CDATA\[|\]\]>$/g, "")
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
+    .replace(/<[^>]*>/g, "").trim();
+}
+
+// Google 新聞 RSS：只保留標題、來源、時間與連結
+async function fetchGoogleNews(cfg, region) {
+  const url = `https://news.google.com/rss/search?q=${encodeURIComponent(cfg.q)}&hl=${cfg.hl}&gl=${cfg.gl}&ceid=${encodeURIComponent(cfg.ceid)}`;
+  const r = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20000) });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const xml = await r.text();
+  const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)].map(m => {
+    const tag = t => { const x = m[1].match(new RegExp(`<${t}[^>]*>([\\s\\S]*?)</${t}>`)); return x ? decodeXml(x[1]) : ""; };
+    const src = m[1].match(/<source url="([^"]*)"[^>]*>([\s\S]*?)<\/source>/);
+    const source = src ? decodeXml(src[2]) : "";
+    let title = tag("title");
+    if (source && title.endsWith(" - " + source)) title = title.slice(0, -(source.length + 3));
+    const link = tag("link");
+    const t = Date.parse(tag("pubDate"));
+    return { region, title: title.slice(0, 160), source: source.slice(0, 60), link, time: Number.isFinite(t) ? new Date(t).toISOString() : null };
+  }).filter(x => x.title && /^https:\/\//.test(x.link));
+  items.sort((a, b) => (b.time || "").localeCompare(a.time || ""));
+  return items.slice(0, CFG.NEWS_COUNT);
+}
+
+// Bing 新聞 RSS（Google 新聞失敗時的備援）
+async function fetchBingNews(cfg, region) {
+  const mkt = { "zh-TW": "zh-TW", "en-US": "en-US", ja: "ja-JP" }[cfg.hl] || "en-US";
+  const r = await fetch(`https://www.bing.com/news/search?q=${encodeURIComponent(cfg.q.replace(/ OR /g, " "))}&format=rss&mkt=${mkt}`, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20000) });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const xml = await r.text();
+  const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)].map(m => {
+    const tag = t => { const x = m[1].match(new RegExp(`<${t}[^>]*>([\\s\\S]*?)</${t}>`)); return x ? decodeXml(x[1]) : ""; };
+    const t = Date.parse(tag("pubDate"));
+    return { region, title: tag("title").slice(0, 160), source: (tag("News:Source") || "Bing 新聞").slice(0, 60), link: tag("link"), time: Number.isFinite(t) ? new Date(t).toISOString() : null };
+  }).filter(x => x.title && /^https:\/\//.test(x.link));
+  items.sort((a, b) => (b.time || "").localeCompare(a.time || ""));
+  if (!items.length) throw new Error("無新聞");
+  return items.slice(0, CFG.NEWS_COUNT);
+}
+async function fetchNews(cfg, region) {
+  const { v } = await firstOk("新聞", [
+    ["Google 新聞", async () => { const x = await fetchGoogleNews(cfg, region); if (!x.length) throw new Error("無新聞"); return x; }],
+    ["Google 新聞（重試）", async () => { await sleep(3000); const x = await fetchGoogleNews(cfg, region); if (!x.length) throw new Error("無新聞"); return x; }],
+    ["Bing 新聞", () => fetchBingNews(cfg, region)],
+  ]);
+  return v;
 }
 
 /* ---------- 盤中模式：只更新加權指數今日走勢 ---------- */
@@ -397,6 +528,8 @@ if (process.argv.includes("--intraday")) {
 }
 
 /* ---------- 收集 ---------- */
+let prevOut = null;
+try { prevOut = JSON.parse(await fs.readFile(OUT_PATH, "utf8")); } catch {}
 const out = {
   updatedAt: new Date().toISOString(), asOf: null,
   tw: null, taifex: null, twTop: null, foreign: [], margin: null, marginPeak: null,
@@ -448,6 +581,7 @@ for (const it of CFG.US) {
   try {
     const tries = [["Yahoo Finance", () => yahoo(it.sym, "3mo")]];
     if (US_FRED[it.sym]) tries.push(["FRED", () => fred(US_FRED[it.sym], 120)]);
+    if (STOOQ_KEY && it.sym !== "^TNX") tries.push(["Stooq", () => stooq(it.sym, 90)]);
     const { v: bars, src } = await firstOk(it.name, tries);
     const n = bars.length, last = bars[n - 1], prev = n > 1 ? bars[n - 2] : null;
     out.us.push({ ...it, src, bars: bars.slice(-22).map(b => ({ date: b.date, c: b.c })), last: last.c, date: last.date,
@@ -455,12 +589,11 @@ for (const it of CFG.US) {
   } catch (e) { errors.push(it.name + "：" + errText(e)); out.us.push({ ...it, bars: [], last: null }); }
   await sleep(150);
 }
-out.usTop = yFails >= 3 ? [] : await watchTop(CFG.US_WATCH);
-if (yFails >= 3) errors.push("美股熱門股：Yahoo Finance 暫時無法連線");
+out.usTop = await watchTop(CFG.US_WATCH, "美股重點股");
 
 // 日股
 try {
-  const { v: nb, src } = await firstOk("日經 225", [["Yahoo Finance", () => yahoo("^N225", "6mo")], ["FRED", () => fred("NIKKEI225", 200)]]);
+  const { v: nb, src } = await firstOk("日經 225", [["Yahoo Finance", () => yahoo("^N225", "6mo")], ["Stooq", () => stooq("^N225", 200)], ["FRED", () => fred("NIKKEI225", 200)]]);
   const { v: jb } = await firstOk("美元兌日圓", [["Yahoo Finance", () => yahoo("JPY=X", "1mo")], ["FRED", () => fred("DEXJPUS", 60)]]);
   const n = nb.length, k = jb.length;
   out.jp = {
@@ -474,8 +607,7 @@ try {
     out.jp.intraday = { ...it, src: "Yahoo Finance", prevClose: prev ? prev.c : null };
   } catch (e) { errors.push("日經 225 今日走勢：" + errText(e)); }
 } catch (e) { errors.push("日股指數：" + errText(e)); }
-out.jpTop = yFails >= 3 ? [] : await watchTop(CFG.JP_WATCH);
-if (yFails >= 3) errors.push("日股熱門股：Yahoo Finance 暫時無法連線");
+out.jpTop = await watchTop(CFG.JP_WATCH, "日股熱門股");
 
 // 匯率與波動度（20 日年化歷史波動率）
 try {
@@ -519,6 +651,24 @@ try {
 for (const k of ["tw", "us", "jp", "fx"]) {
   try { out.news[k] = await fetchNews(CFG.NEWS[k], k); } catch (e) { errors.push(`新聞（${k}）：${errText(e)}`); }
 }
+
+/* ---------- 本次未取得的項目，沿用上次成功的結果 ---------- */
+const stale = [];
+if (prevOut) {
+  const empty = v => v == null || (Array.isArray(v) && !v.length) || (v.items && !v.items.length);
+  for (const [k, label] of [["taifex", "台指期"], ["twTop", "台股成交排行"], ["usTop", "美股重點股"], ["jpTop", "日股熱門股"], ["jp", "日股"], ["fx", "匯率"]]) {
+    if (empty(out[k]) && !empty(prevOut[k])) { out[k] = prevOut[k]; stale.push(label); }
+  }
+  if (out.taifex && !out.taifex.night && prevOut.taifex && prevOut.taifex.night) out.taifex.night = prevOut.taifex.night;
+  for (const k of ["tw", "us", "jp", "fx"]) {
+    if (empty(out.news[k]) && prevOut.news && !empty(prevOut.news[k])) { out.news[k] = prevOut.news[k]; stale.push(`新聞（${k}）`); }
+  }
+  (out.us || []).forEach((u, i) => {
+    const p = (prevOut.us || []).find(x => x.sym === u.sym);
+    if (u.last == null && p && p.last != null) { out.us[i] = p; stale.push(u.name); }
+  });
+}
+out.stale = stale;
 
 /* ---------- 判斷四項條件 ---------- */
 const S = [];
