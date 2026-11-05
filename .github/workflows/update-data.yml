@@ -38,5 +38,11 @@ jobs:
             echo "資料沒有變化"
           else
             git commit -m "更新市場資料 $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M')"
-            git push
+            # 執行期間若儲存庫有其他更新（例如手動修改檔案），先合併再推送，最多重試 3 次
+            for i in 1 2 3; do
+              git pull --rebase origin main && git push && exit 0
+              echo "推送失敗，5 秒後重試（第 $i 次）"
+              sleep 5
+            done
+            exit 1
           fi
