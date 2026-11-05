@@ -60,7 +60,15 @@ a{color:inherit}
 .kv small{color:var(--muted);font-size:11px}
 svg{display:block;width:100%;height:auto}
 .grid{stroke:var(--line-soft);stroke-width:1}
-.ax{font-size:9px;fill:var(--faint)}
+.ax{font-size:11px;fill:var(--muted)}
+.base{stroke:var(--faint);stroke-width:1;stroke-dasharray:4 4}
+.rseg{display:inline-flex;border:1px solid var(--line);border-radius:4px;overflow:hidden;flex:none}
+.rseg button{background:transparent;border:0;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--muted)}
+.rseg button+button{border-left:1px solid var(--line)}
+.rseg button[aria-pressed="true"]{background:var(--raised);color:var(--accent);font-weight:600}
+.h-note{font-size:11px;color:var(--faint);margin-left:auto;margin-right:12px}
+.mob .rseg{display:flex;margin:0 0 12px}
+.mob .rseg button{flex:1;padding:7px 0}
 .f-up{fill:var(--up)}.f-down{fill:var(--down)}.s-up{stroke:var(--up)}.s-down{stroke:var(--down)}
 .l-ma20{fill:none;stroke:var(--ma20);stroke-width:1.4}
 .l-ma120{fill:none;stroke:var(--ma120);stroke-width:1.4;stroke-dasharray:4 3}
