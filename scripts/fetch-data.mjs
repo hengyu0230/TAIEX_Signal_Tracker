@@ -654,6 +654,7 @@ async function cnbcQuotes(syms) {
 }
 // 記錄每日收盤與盤中取樣，供走勢圖使用
 function recordQuotes(qs) {
+  let added = 0;
   cache.cq = cache.cq || {};
   for (const [sym, q] of Object.entries(qs)) {
     const e = cache.cq[sym] = cache.cq[sym] || { daily: {}, intra: {} };
@@ -661,13 +662,14 @@ function recordQuotes(qs) {
     if (q.prevClose) e.prev = { ...(e.prev || {}), [q.date]: q.prevClose };
     if (q.t && INTRA_SYMS.includes(sym)) {
       const day = e.intra[q.date] = e.intra[q.date] || [];
-      if (!day.some(p => p.t === q.t)) day.push({ t: q.t, v: q.last });
+      if (!day.some(p => p.t === q.t)) { day.push({ t: q.t, v: q.last }); added++; }
       day.sort((a, b) => (a.t < b.t ? -1 : 1));
     }
     for (const d of Object.keys(e.daily)) if (d < addDays(q.date, -200)) delete e.daily[d];
     for (const d of Object.keys(e.intra)) if (d < addDays(q.date, -4)) delete e.intra[d];
     for (const d of Object.keys(e.prev || {})) if (d < addDays(q.date, -10)) delete e.prev[d];
   }
+  return added;
 }
 function cnbcBars(sym) {
   const e = cache.cq && cache.cq[sym]; if (!e) return [];
@@ -725,14 +727,15 @@ async function sampleFutures() {
   cache.fut = cache.fut || {};
   const k = `${ses.key}:${ses.start}`;
   const e = cache.fut[k] = cache.fut[k] || { ref: q.ref, points: [], updated: null };
-  if (!e.points.some(p => p.t === q.t)) e.points.push({ t: q.t, v: q.last });
+  const added = !e.points.some(p => p.t === q.t);
+  if (added) e.points.push({ t: q.t, v: q.last });
   // 夜盤跨日：15:00 之後的時間排在 00:00–05:00 之前
   const order = t => (ses.key === "night" && t < "12:00" ? "1" : "0") + t;
   e.points.sort((a, b) => (order(a.t) < order(b.t) ? -1 : 1));
   if (q.ref) e.ref = q.ref;
   e.updated = new Date().toISOString();
   for (const kk of Object.keys(cache.fut)) if (kk.split(":")[1] < addDays(tpeToday(), -4)) delete cache.fut[kk];
-  return { session: ses.key, start: ses.start, last: q.last, t: q.t };
+  return { session: ses.key, start: ses.start, last: q.last, t: q.t, added };
 }
 // 取出最近一次的日盤與夜盤取樣（20 小時內有更新者）
 function futLive(kind) {
@@ -744,7 +747,7 @@ function futLive(kind) {
 
 /* ---------- 盤中模式：台股、日股、美股的今日走勢取樣 ---------- */
 if (process.argv.includes("--intraday")) {
-  let latest = null;
+  let latest = null, changed = 0;
   try { latest = JSON.parse(await fs.readFile(OUT_PATH, "utf8")); } catch {}
   // 台股（證交所即時行情）
   try {
@@ -752,7 +755,7 @@ if (process.argv.includes("--intraday")) {
     cache.intra = cache.intra || {};
     for (const k of Object.keys(cache.intra)) if (k < addDays(p.date, -5)) delete cache.intra[k];
     const day = cache.intra[p.date] || { prevClose: p.prevClose, points: [] };
-    if (!day.points.some(x => x.t === p.t)) day.points.push({ t: p.t, v: p.v });
+    if (!day.points.some(x => x.t === p.t)) { day.points.push({ t: p.t, v: p.v }); changed++; }
     day.points.sort((a, b) => (a.t < b.t ? -1 : 1));
     if (p.prevClose) day.prevClose = p.prevClose;
     cache.intra[p.date] = day;
@@ -767,7 +770,8 @@ if (process.argv.includes("--intraday")) {
   // 台指期（期交所即時行情）
   try {
     const f = await sampleFutures();
-    if (f && latest && latest.taifex) {
+    if (f && f.added) changed++;
+    if (f && f.added && latest && latest.taifex) {
       latest.taifex.liveDay = futLive("day");
       latest.taifex.liveNight = futLive("night");
     }
@@ -776,8 +780,9 @@ if (process.argv.includes("--intraday")) {
   // 美股與日經（CNBC）
   try {
     const qs = await cnbcQuotes(INTRA_SYMS);
-    recordQuotes(qs);
-    if (latest) {
+    const added = recordQuotes(qs);
+    changed += added;
+    if (latest && added) {
       (latest.us || []).forEach(u => {
         const q = qs[u.sym]; if (!q) return;
         u.last = q.last; u.change = q.changePct; u.date = q.date; u.src = "CNBC";
@@ -793,8 +798,11 @@ if (process.argv.includes("--intraday")) {
     }
     console.log("美日盤中：" + Object.keys(qs).join(", "));
   } catch (e) { console.log("美日盤中取樣失敗：" + errText(e)); }
+  // 沒有新的取樣點（休市、排程延遲等）就不存檔，也就不會產生提交與網站發布
+  if (!changed) { console.log("沒有新的盤中資料，本次不存檔"); process.exit(0); }
   if (latest) { latest.intradayAt = new Date().toISOString(); await fs.writeFile(OUT_PATH, JSON.stringify(latest)); }
   await fs.writeFile(CACHE_PATH, JSON.stringify(cache));
+  console.log(`新增 ${changed} 個盤中取樣點`);
   process.exit(0);
 }
 
@@ -817,7 +825,7 @@ process.on("unhandledRejection", emergencyWrite);
 let prevOut = null;
 try { prevOut = JSON.parse(await fs.readFile(OUT_PATH, "utf8")); } catch {}
 const out = {
-  version: "2026-11-06c",
+  version: "2026-11-07a",
   updatedAt: new Date().toISOString(), asOf: null,
   tw: null, taifex: null, twTop: null, foreign: [], margin: null, marginPeak: null,
   us: [], usTop: [], jp: null, jpTop: [], fx: null, news: { tw: [], us: [], jp: [], fx: [] }, signals: [],
