@@ -160,8 +160,11 @@
   }
   function prevOf(bars) { return bars && bars.length > 1 ? bars[bars.length - 2].c : null; }
 
-  function futCard(title, sub, f, hist, emptyNote, extra) {
-    var chart = hist && hist.length > 1 ? lineChart(hist.map(function (b) { return { date: b.date, v: b.c }; }), { h: 120, dp: 0, label: title + "近期走勢" })
+  function futCard(title, sub, f, hist, emptyNote, extra, live) {
+    var chart = live && live.points && live.points.length > 1
+      ? '<p class="muted" style="font-size:11px;margin:2px 0 4px">盤中走勢（' + esc(String(live.start || "").slice(5)) + " 起，約每 10–15 分鐘取樣；最新 " + esc(live.points[live.points.length - 1].t) + " " + fmt(live.points[live.points.length - 1].v) + "）</p>" +
+        lineChart(live.points.map(function (p) { return { t: p.t, v: p.v }; }), { h: 130, dp: 0, base: live.prevClose, baseLabel: "參考價", label: title + "盤中走勢" })
+      : hist && hist.length > 1 ? lineChart(hist.map(function (b) { return { date: b.date, v: b.c }; }), { h: 120, dp: 0, label: title + "近期走勢" })
       : closeBox("最終收盤", f.date, f.last, f.changePct, 0, f.last != null && f.change != null ? n(f.last) - n(f.change) : null);
     return '<div class="ucard"><div class="h"><h2>' + esc(title) + "</h2><span>" + esc(sub) + "</span></div>" +
       '<div class="stat"><span class="big num">' + fmt(f.last) + '</span><span class="chg ' + cls(f.change) + '">' + sgn(f.change) + "（" + pct(f.changePct) + "）</span></div>" +
@@ -171,9 +174,9 @@
     var f = d.taifex; if (!f) return '<p class="empty">台指期資料未取得。</p>';
     var c = d.tw && d.tw.last ? n(d.tw.last.c) : null, h = '<div class="ucards">';
     h += futCard("台指期日盤", String(f.date || "").slice(5) + "｜08:45–13:45", f, f.dayHist, "日盤走勢將隨每日更新逐步累積。",
-      "近月 " + esc(f.month || "") + "｜成交 " + fmt(f.volume) + " 口" + (c ? "｜與現貨價差 " + sgn(n(f.last) - c, 0) : ""));
-    if (f.night) h += futCard("台指期夜盤", String(f.night.date || "").slice(5) + "｜15:00–05:00", f.night, f.nightHist, "夜盤走勢將隨每日更新逐步累積。",
-      "近月 " + esc(f.night.month || "") + "｜成交 " + fmt(f.night.volume) + " 口");
+      "近月 " + esc(f.month || "") + "｜成交 " + fmt(f.volume) + " 口" + (c ? "｜與現貨價差 " + sgn(n(f.last) - c, 0) : ""), f.liveDay);
+    if (f.night) h += futCard("台指期夜盤", "前一交易日 15:00 至 " + String(f.night.date || "").slice(5) + " 05:00", f.night, f.nightHist, "夜盤走勢將隨每日更新逐步累積。",
+      "近月 " + esc(f.night.month || "") + "｜成交 " + fmt(f.night.volume) + " 口" + (f.night.src ? "｜" + esc(f.night.src) : ""), f.liveNight);
     else h += '<div class="ucard"><div class="h"><h2>台指期夜盤</h2></div><p class="empty">夜盤資料未取得。</p></div>';
     return h + "</div>";
   }
@@ -303,7 +306,7 @@
       "<li>本網站資料取自公開來源並經程式自動整理，可能有延遲、遺漏或錯誤；實際數據以各資料來源之官方公告為準。</li>" +
       "<li>新聞標題與連結之著作權屬原刊登媒體所有，本網站僅提供索引，內容以原始報導為準。</li>" +
       "<li>本網站與下列資料來源機構無任何關聯，亦未獲其授權或背書。使用本網站即表示您已閱讀並同意上述聲明。</li>" +
-      '</ol><div class="src">資料來源：臺灣證券交易所、臺灣期貨交易所、美國聯準會經濟資料庫（FRED）、CNBC、Yahoo Finance、Google 新聞與各媒體 RSS。本網站資料為收盤後整理，並非即時報價。資料更新時間 ' + esc(time(d && d.updatedAt)) + "。資料程式版本 " + esc((d && d.version) || "舊版") + "。</div></div>";
+      '</ol><div class="src">資料來源：臺灣證券交易所、臺灣期貨交易所、美國聯準會經濟資料庫（FRED）、CNBC、Yahoo Finance、Google 新聞與各媒體 RSS；即時參考圖表由 TradingView 提供。本網站整理之資料並非即時報價。資料更新時間 ' + esc(time(d && d.updatedAt)) + "。資料程式版本 " + esc((d && d.version) || "舊版") + "。</div></div>";
   }
 
   /* ---------- 電腦版 ---------- */
@@ -342,7 +345,6 @@
       "<div>" + head("匯率波動度", "20 日年化歷史波動率") + (fx.vol || "") + "</div>" +
       "<div>" + head("其他主要匯率") + fxOthers(d) + '<div class="blk" style="margin-top:16px">' + head("匯率新聞") + newsHtml(d.news && d.news.fx, 3) + "</div></div>" +
       "</div></section>";
-    h += '<hr class="solid">' + legalHtml(d);
     $("desk").innerHTML = h;
   }
 
@@ -377,13 +379,15 @@
       h += '<div class="blk">' + head("其他主要匯率") + fxOthers(d) + "</div>";
       h += '<div class="blk">' + head("新聞") + newsHtml(d.news && d.news.fx, 8) + "</div>";
     }
-    h += '</div><hr class="solid">' + legalHtml(d);
+    h += "</div>";
     $("mob").innerHTML = h;
   }
 
   function render() {
     if (!DATA) return;
     renderDesk(DATA); renderMob(DATA);
+    $("legal").innerHTML = '<hr class="solid">' + legalHtml(DATA);
+    renderTV();
     $("stamp").textContent = "資料 " + (DATA.asOf ? DATA.asOf.slice(5).replace("-", "/") : "—") + "｜更新 " + time(DATA.updatedAt);
     var hours = (Date.now() - new Date(DATA.updatedAt).getTime()) / 36e5, w = $("warn");
     var stale = (DATA.stale || []).filter(function (x) { return !/^新聞/.test(x); });
@@ -392,6 +396,54 @@
     else w.hidden = true;
     document.documentElement.style.setProperty("--bar-h", $("bar").offsetHeight + "px");
   }
+
+  /* ---------- TradingView 即時參考圖表（第三方，使用者點選後才載入） ---------- */
+  var TV_SYMBOLS = [
+    ["OANDA:SPX500USD", "標普 500", "差價合約，即時"],
+    ["OANDA:NAS100USD", "那斯達克 100", "差價合約，即時"],
+    ["OANDA:JP225USD", "日經 225", "差價合約，即時"],
+    ["NYSE:TSM", "台積電 ADR", "延遲報價"],
+    ["FX_IDC:USDTWD", "美元兌新台幣", "即時"],
+    ["FX_IDC:USDJPY", "美元兌日圓", "即時"],
+  ];
+  var tvMountedTheme = null;
+  function renderTV() {
+    var box = $("tv"); if (!box) return;
+    var on = recall("tv") === "1";
+    var theme = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+    if (!on) {
+      tvMountedTheme = null;
+      box.innerHTML = '<div class="region-row"><div class="region">即時參考圖表</div></div>' +
+        '<p class="muted" style="font-size:13px;margin:0 0 10px">由 TradingView 提供的免費圖表。指數為差價合約（CFD）報價，與官方指數略有差異；美股個股為延遲報價；匯率為即時報價。台股與台指期不在 TradingView 免費圖表的提供範圍內。</p>' +
+        '<p class="muted" style="font-size:12px;margin:0 0 12px">載入後會連線至 TradingView 網站，該網站可能依其隱私權政策記錄造訪資訊。</p>' +
+        '<button type="button" class="icon-btn" id="tv-on">載入即時參考圖表</button>';
+      return;
+    }
+    if (tvMountedTheme === theme && box.querySelector(".tvgrid")) return;
+    tvMountedTheme = theme;
+    box.innerHTML = '<div class="region-row"><div class="region">即時參考圖表</div><span class="h-note">資料來源：TradingView</span><button type="button" class="icon-btn" id="tv-off">關閉</button></div><div class="tvgrid"></div>';
+    var grid = box.querySelector(".tvgrid");
+    TV_SYMBOLS.forEach(function (x) {
+      var cell = document.createElement("div"); cell.className = "tvcell";
+      var head = document.createElement("div"); head.className = "h";
+      var h2 = document.createElement("h2"); h2.textContent = x[1];
+      var sp = document.createElement("span"); sp.textContent = x[2];
+      head.appendChild(h2); head.appendChild(sp); cell.appendChild(head);
+      var wrap = document.createElement("div"); wrap.className = "tradingview-widget-container tvframe";
+      var inner = document.createElement("div"); inner.className = "tradingview-widget-container__widget";
+      wrap.appendChild(inner);
+      var sc = document.createElement("script");
+      sc.src = "https://s3.tradingview.com/external-embedding/embed-widget-mini-symbol-overview.js";
+      sc.async = true;
+      sc.text = JSON.stringify({ symbol: x[0], width: "100%", height: "100%", locale: "zh_TW", dateRange: "1D", colorTheme: theme, isTransparent: true, autosize: true, largeChartUrl: "", chartOnly: false, noTimeScale: false });
+      wrap.appendChild(sc);
+      cell.appendChild(wrap); grid.appendChild(cell);
+    });
+  }
+  document.addEventListener("click", function (e) {
+    if (e.target && e.target.id === "tv-on") { store("tv", "1"); renderTV(); }
+    else if (e.target && e.target.id === "tv-off") { store("tv", "0"); renderTV(); }
+  });
 
   /* ---------- 互動 ---------- */
   document.addEventListener("click", function (e) {
@@ -433,6 +485,7 @@
     document.documentElement.setAttribute("data-theme", t);
     $("theme-color").setAttribute("content", t === "light" ? "#F3F4F6" : "#0C1117");
     store("theme", t); syncThemeButtons();
+    if (DATA) renderTV();
   }
   function syncThemeButtons() {
     var cur = document.documentElement.getAttribute("data-theme");

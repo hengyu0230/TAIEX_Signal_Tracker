@@ -401,7 +401,36 @@ function pickTX(rows, wantNight) {
   if (date && /^\d{8}$/.test(date)) date = `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}`;
   return { contract: "TX", month: String(r[kMonth]).trim(), last, change: chg, changePct: chg != null && last ? chg / (last - chg) : null, volume: toNum(r[kVol]), date, hasSession: !!kSession };
 }
-async function fetchTaifex() {
+// 期交所「每日行情下載」（盤後即時更新，含日盤與夜盤；開放資料 API 常延遲一天）
+async function taifexCsv() {
+  const end = tpeToday(), start = addDays(end, -10);
+  const body = new URLSearchParams({ down_type: "1", commodity_id: "TX", commodity_id2: "", queryStartDate: start.replace(/-/g, "/"), queryEndDate: end.replace(/-/g, "/") });
+  const r = await fetch("https://www.taifex.com.tw/cht/3/futDataDown", { method: "POST", headers: { "User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded" }, body, signal: AbortSignal.timeout(30000) });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const buf = Buffer.from(await r.arrayBuffer());
+  let text = buf.toString("utf8");
+  if (!text.includes("交易日期")) text = new TextDecoder("big5").decode(buf);
+  const lines = text.trim().split(/\r?\n/).filter(Boolean);
+  const head = (lines[0] || "").split(",").map(x => x.trim());
+  const ix = name => head.findIndex(h => h.includes(name));
+  const iDate = ix("交易日期"), iCon = ix("契約"), iMon = ix("到期月份"), iLast = ix("收盤價"), iChg = ix("漲跌價"), iVol = ix("成交量"), iSes = ix("交易時段");
+  if (iDate < 0 || iLast < 0) throw new Error("格式不符");
+  const rows = lines.slice(1).map(l => l.split(",").map(x => x.trim())).filter(c => c[iCon] === "TX" && c[iMon] && !/[\/W]/i.test(c[iMon]) && toNum(c[iLast]) != null);
+  function pick(night) {
+    const list = rows.filter(c => (iSes >= 0 && /盤後/.test(c[iSes])) === night);
+    if (!list.length) return null;
+    const lastDate = list.map(c => c[iDate]).sort().at(-1);
+    const r0 = list.filter(c => c[iDate] === lastDate).sort((a, b) => a[iMon].localeCompare(b[iMon]))[0];
+    const last = toNum(r0[iLast]), chg = toNum(r0[iChg]);
+    return { contract: "TX", month: r0[iMon], last, change: chg, changePct: chg != null && last ? chg / (last - chg) : null, volume: toNum(r0[iVol]), date: lastDate.replace(/\//g, "-") };
+  }
+  const day = pick(false);
+  if (!day) throw new Error("無台指期資料");
+  day.night = pick(true);
+  return day;
+}
+
+async function fetchTaifexApi() {
   let rows = null;
   try { rows = await getJSON(TAIFEX + "/v1/DailyMarketReportFut"); } catch {}
   if (!Array.isArray(rows)) {
@@ -411,7 +440,6 @@ async function fetchTaifex() {
   }
   const day = pickTX(rows, false);
   if (!day) throw new Error("找不到台指期近月資料");
-  // 夜盤（盤後交易時段 15:00 至次日 05:00）：先在同一份資料中找，找不到再找期交所的盤後專用介面
   let night = day.hasSession ? pickTX(rows, true) : null;
   if (!night) {
     try {
@@ -420,12 +448,36 @@ async function fetchTaifex() {
         try { night = pickTX(await getJSON(TAIFEX + p), null); } catch {}
         if (night) break;
       }
-      if (!night) errors.push("台指期夜盤：期交所開放資料中找不到夜盤欄位");
-    } catch (e) { errors.push("台指期夜盤：" + errText(e)); }
+    } catch {}
   }
   delete day.hasSession;
   if (night) delete night.hasSession;
   day.night = night;
+  return day;
+}
+
+// 兩個來源都試，日盤與夜盤各自採用日期較新的一份
+async function fetchTaifex() {
+  let a = null, b = null; const msgs = [];
+  try { a = await taifexCsv(); } catch (e) { msgs.push("每日行情下載：" + errText(e)); }
+  try { b = await fetchTaifexApi(); } catch (e) { msgs.push("開放資料：" + errText(e)); }
+  if (!a && !b) throw new Error(msgs.join("；"));
+  const newer = (x, y) => (!x ? y : !y ? x : (y.date || "") > (x.date || "") ? y : x);
+  const day = { ...newer(a, b) };
+  day.night = newer(a && a.night, b && b.night);
+  // 期交所每日行情要到當日日盤收盤後才收錄前一晚的夜盤；05:00–15:00 之間改用即時行情補上剛結束的夜盤收盤
+  try {
+    const { date: today, hm } = tpeNow();
+    if (hm >= "05:00" && hm < "15:00") {
+      const q = await misTaifexQuote(1);
+      const d = q.cdate && q.cdate <= today ? q.cdate : today;
+      if (q.last && (!day.night || d > (day.night.date || ""))) {
+        const chg = q.ref ? round(q.last - q.ref, 2) : null;
+        day.night = { contract: "TX", month: (day.night && day.night.month) || day.month, last: q.last, change: chg, changePct: chg != null && q.ref ? chg / q.ref : null, volume: q.volume, date: d, src: "期交所即時行情" };
+      }
+    }
+  } catch (e) { msgs.push("夜盤即時行情：" + errText(e)); }
+  if (!day.night) errors.push("台指期夜盤：" + (msgs.join("；") || "找不到夜盤資料"));
   return day;
 }
 
@@ -637,6 +689,59 @@ function withQuote(bars, q) {
   return bars;
 }
 
+/* ---------- 期交所即時行情（非官方介面）：台指期日盤、夜盤盤中取樣 ---------- */
+function tpeNow() { const d = new Date(Date.now() + 8 * 3600e3).toISOString(); return { date: d.slice(0, 10), hm: d.slice(11, 16) }; }
+// 依台灣時間判斷目前是日盤（0）或夜盤（1）；回傳交易時段開始的日期
+function futSession() {
+  const { date, hm } = tpeNow();
+  if (hm >= "08:40" && hm <= "13:55") return { market: 0, key: "day", start: date };
+  if (hm >= "14:55") return { market: 1, key: "night", start: date };
+  if (hm <= "05:10") return { market: 1, key: "night", start: addDays(date, -1) };
+  return null;
+}
+async function misTaifexQuote(market) {
+  const r = await fetch("https://mis.taifex.com.tw/futures/api/getQuoteList", {
+    method: "POST", headers: { "User-Agent": UA, "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ MarketType: String(market), SymbolType: "F", KindID: "1", CID: "TXF", ExpireMonth: "", RowSize: "全部", PageNo: "", SortColumn: "", AscDesc: "A" }),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const j = await r.json();
+  if (!j || String(j.RtCode) !== "0") throw new Error("回應錯誤");
+  const rows = ((j.RtData && j.RtData.QuoteList) || []).filter(x => /^TXF/.test(String(x.SymbolID || "")) && !String(x.SymbolID).includes("/") && toNum(x.CLastPrice) != null && toNum(x.CLastPrice) > 0);
+  if (!rows.length) throw new Error("無台指期報價");
+  // 近月合約通常成交量最大
+  rows.sort((a, b) => (toNum(b.CTotalVolume) || 0) - (toNum(a.CTotalVolume) || 0));
+  const x = rows[0];
+  const tm = String(x.CTime || "").replace(/\D/g, "");
+  const cd = String(x.CDate || "").replace(/\D/g, "");
+  return { last: toNum(x.CLastPrice), ref: toNum(x.CRefPrice), t: tm.length >= 4 ? `${tm.slice(0, 2)}:${tm.slice(2, 4)}` : tpeNow().hm, volume: toNum(x.CTotalVolume), symbol: String(x.SymbolID),
+    cdate: cd.length === 8 ? `${cd.slice(0, 4)}-${cd.slice(4, 6)}-${cd.slice(6)}` : null };
+}
+async function sampleFutures() {
+  const ses = futSession();
+  if (!ses) return null;
+  const q = await misTaifexQuote(ses.market);
+  cache.fut = cache.fut || {};
+  const k = `${ses.key}:${ses.start}`;
+  const e = cache.fut[k] = cache.fut[k] || { ref: q.ref, points: [], updated: null };
+  if (!e.points.some(p => p.t === q.t)) e.points.push({ t: q.t, v: q.last });
+  // 夜盤跨日：15:00 之後的時間排在 00:00–05:00 之前
+  const order = t => (ses.key === "night" && t < "12:00" ? "1" : "0") + t;
+  e.points.sort((a, b) => (order(a.t) < order(b.t) ? -1 : 1));
+  if (q.ref) e.ref = q.ref;
+  e.updated = new Date().toISOString();
+  for (const kk of Object.keys(cache.fut)) if (kk.split(":")[1] < addDays(tpeToday(), -4)) delete cache.fut[kk];
+  return { session: ses.key, start: ses.start, last: q.last, t: q.t };
+}
+// 取出最近一次的日盤與夜盤取樣（20 小時內有更新者）
+function futLive(kind) {
+  const list = Object.entries(cache.fut || {}).filter(([k, e]) => k.startsWith(kind + ":") && e.points.length > 1 && Date.now() - Date.parse(e.updated) < 20 * 3600e3);
+  if (!list.length) return null;
+  const [k, e] = list.sort((a, b) => (a[0] < b[0] ? 1 : -1))[0];
+  return { start: k.split(":")[1], points: e.points, prevClose: e.ref, src: "期交所即時行情（約每 10–15 分鐘取樣）", live: true };
+}
+
 /* ---------- 盤中模式：台股、日股、美股的今日走勢取樣 ---------- */
 if (process.argv.includes("--intraday")) {
   let latest = null;
@@ -659,6 +764,15 @@ if (process.argv.includes("--intraday")) {
     }
     console.log(`台股盤中：${p.date} ${p.t} ${p.v}`);
   } catch (e) { console.log("台股盤中取樣失敗：" + errText(e)); }
+  // 台指期（期交所即時行情）
+  try {
+    const f = await sampleFutures();
+    if (f && latest && latest.taifex) {
+      latest.taifex.liveDay = futLive("day");
+      latest.taifex.liveNight = futLive("night");
+    }
+    console.log(f ? `台指期盤中：${f.session} ${f.t} ${f.last}` : "台指期：非交易時段");
+  } catch (e) { console.log("台指期盤中取樣失敗：" + errText(e)); }
   // 美股與日經（CNBC）
   try {
     const qs = await cnbcQuotes(INTRA_SYMS);
@@ -703,7 +817,7 @@ process.on("unhandledRejection", emergencyWrite);
 let prevOut = null;
 try { prevOut = JSON.parse(await fs.readFile(OUT_PATH, "utf8")); } catch {}
 const out = {
-  version: "2026-11-05f",
+  version: "2026-11-06c",
   updatedAt: new Date().toISOString(), asOf: null,
   tw: null, taifex: null, twTop: null, foreign: [], margin: null, marginPeak: null,
   us: [], usTop: [], jp: null, jpTop: [], fx: null, news: { tw: [], us: [], jp: [], fx: [] }, signals: [],
@@ -758,6 +872,9 @@ try {
   for (const k of ["night", "dayFut"]) for (const d of Object.keys(cache[k] || {})) if (d < addDays(tpeToday(), -120)) delete cache[k][d];
   out.taifex.nightHist = Object.keys(cache.night).sort().slice(-60).map(d => ({ date: d, c: cache.night[d] }));
   out.taifex.dayHist = Object.keys(cache.dayFut || {}).sort().slice(-60).map(d => ({ date: d, c: cache.dayFut[d] }));
+  try { await sampleFutures(); } catch (e) { errors.push("台指期盤中取樣：" + errText(e)); }
+  out.taifex.liveDay = futLive("day");
+  out.taifex.liveNight = futLive("night");
 } catch (e) { errors.push("台指期：" + errText(e)); }
 try { out.twTop = await fetchTwTop(); } catch (e) { errors.push("台股成交排行：" + errText(e)); }
 
