@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://s3.tradingview.com; frame-src https://*.tradingview.com https://www.tradingview-widget.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.tradingview.com; connect-src 'self'; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="robots" content="noindex, nofollow, noarchive">
-<meta name="referrer" content="no-referrer">
+<meta name="referrer" content="strict-origin-when-cross-origin">
 <title>台股止跌訊號</title>
 <meta name="description" content="台指期簡易追蹤：加權指數、台指期、外資、美股、日股與匯率，每日自動更新。">
 <meta property="og:type" content="website">
@@ -84,6 +84,13 @@ svg{display:block;width:100%;height:auto}
 .ucard .big{font-size:24px}
 .closebox{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;margin:10px 0;padding:12px 14px;border:1px dashed var(--line);border-radius:4px;font-size:13px}
 .closebox b{font-size:20px}
+.tvwrap,.legalwrap{max-width:1280px;margin:0 auto;padding:0 20px}
+.tvwrap{padding-top:10px;padding-bottom:10px}
+.legalwrap{padding-bottom:40px}
+.tvgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+.tvcell{border:1px solid var(--line);border-radius:4px;padding:12px 14px}
+.tvframe{height:180px}
+@media (max-width:899px){.tvwrap,.legalwrap{padding:0 14px}.tvgrid{grid-template-columns:1fr}.legalwrap .solid{margin:10px 0 16px}}
 .night{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;margin-top:10px;padding:10px 0 0;border-top:1px solid var(--line-soft);font-size:13px}
 .night b{font-size:16px}
 .rseg{display:inline-flex;border:1px solid var(--line);border-radius:4px;overflow:hidden;flex:none}
@@ -199,6 +206,8 @@ dialog::backdrop{background:rgba(0,0,0,.55)}
 
 <main class="desk" id="desk" aria-label="電腦版"></main>
 <main class="mob" id="mob" aria-label="手機版"></main>
+<section class="tvwrap" id="tv" aria-label="即時參考圖表"></section>
+<footer class="legalwrap" id="legal"></footer>
 
 <dialog id="dlg-settings" aria-labelledby="dlg-settings-t">
   <div class="dlg-h"><h2 id="dlg-settings-t">設定</h2><button class="icon-btn" data-close type="button">關閉</button></div>
