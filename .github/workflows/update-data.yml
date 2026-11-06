@@ -73,9 +73,12 @@ jobs:
       contents: read    # 讀取網站檔案
       pages: write      # 發布網站
       id-token: write   # 發布網站所需的身分驗證
+    concurrency:
+      group: pages-deploy     # 同一時間只進行一次網站發布
+      cancel-in-progress: false
     environment:
       name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      url: ${{ steps.deploy1.outputs.page_url || steps.deploy2.outputs.page_url }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -84,5 +87,13 @@ jobs:
       - uses: actions/upload-pages-artifact@v4
         with:
           path: .
-      - id: deploy
+      # 若前一次發布尚未完成，等待後再試一次
+      - id: deploy1
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+      - name: 等待前一次發布完成
+        if: steps.deploy1.outcome == 'failure'
+        run: sleep 90
+      - id: deploy2
+        if: steps.deploy1.outcome == 'failure'
         uses: actions/deploy-pages@v4
