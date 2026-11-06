@@ -6,12 +6,15 @@ on:
     - cron: "30 7 * * 1-5"   # 台灣 15:30：收盤、外資
     - cron: "45 13 * * 1-5"  # 台灣 21:45：融資
     - cron: "45 14 * * 1-5"  # 台灣 22:45：融資完整數據
-    - cron: "30 22 * * 1-5"  # 台灣隔日 06:30：美股收盤
+    - cron: "30 22 * * 1-5"  # 台灣隔日 06:30：美股收盤、夜盤
     - cron: "*/10 0-6 * * 1-5"   # 台灣 08:00–14:50：台股與日股盤中，每 10 分鐘取樣
-    - cron: "*/15 13-21 * * 1-5" # 台灣 21:00–05:45：美股盤中，每 15 分鐘取樣
+    - cron: "*/15 7-12 * * 1-5"  # 台灣 15:00–20:45：台指期夜盤，每 15 分鐘取樣
+    - cron: "*/15 13-21 * * 1-5" # 台灣 21:00–05:45：美股盤中與台指期夜盤，每 15 分鐘取樣
+  push:
+    branches: [main]         # 修改網站檔案後自動發布
   workflow_dispatch: {}      # 可在 Actions 頁面手動執行
 
-# 預設不給任何權限，只在需要的工作中開放寫入程式庫內容
+# 預設不給任何權限，只在需要的工作中開放
 permissions: {}
 
 concurrency:
@@ -20,10 +23,13 @@ concurrency:
 
 jobs:
   update:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      contents: write
+      contents: write   # 存回資料
+    outputs:
+      changed: ${{ steps.commit.outputs.changed }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -35,19 +41,48 @@ jobs:
           STOOQ_APIKEY: ${{ secrets.STOOQ_APIKEY }}  # 選用：未設定時自動略過
         run: node scripts/fetch-data.mjs $MODE
       - name: 提交更新
+        id: commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/
           if git diff --cached --quiet; then
-            echo "資料沒有變化"
-          else
-            git commit -m "更新市場資料 $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M')"
-            # 執行期間若儲存庫有其他更新（例如手動修改檔案），先合併再推送，最多重試 3 次
-            for i in 1 2 3; do
-              git pull --rebase origin main && git push && exit 0
-              echo "推送失敗，5 秒後重試（第 $i 次）"
-              sleep 5
-            done
-            exit 1
+            echo "資料沒有變化，不提交也不發布"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          git commit -m "更新市場資料 $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M')"
+          # 執行期間若儲存庫有其他更新，先合併再推送，最多重試 3 次
+          for i in 1 2 3; do
+            if git pull --rebase origin main && git push; then
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "推送失敗，5 秒後重試（第 $i 次）"
+            sleep 5
+          done
+          exit 1
+
+  # 網站發布：資料有更新、手動執行或修改網站檔案時才進行，與資料更新顯示在同一筆紀錄中
+  deploy:
+    needs: update
+    if: always() && (github.event_name == 'push' || (needs.update.result == 'success' && (needs.update.outputs.changed == 'true' || github.event_name == 'workflow_dispatch')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read    # 讀取網站檔案
+      pages: write      # 發布網站
+      id-token: write   # 發布網站所需的身分驗證
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main     # 取得剛存回的最新資料
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: .
+      - id: deploy
+        uses: actions/deploy-pages@v4
