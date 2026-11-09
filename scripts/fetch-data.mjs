@@ -608,9 +608,10 @@ async function fetchNews(cfg, region) {
 }
 
 /* ---------- CNBC 報價（非官方介面，不需金鑰；只取當下報價，走勢由本工具自行累積） ---------- */
-const CNBC_SYM = { "^GSPC": ".SPX", "^IXIC": ".IXIC", "^SOX": ".SOX", "^VIX": ".VIX", "^N225": ".N225", "TSM": "TSM" };
+const CNBC_SYM = { "^GSPC": ".SPX", "^IXIC": ".IXIC", "^SOX": ".SOX", "^VIX": ".VIX", "^N225": ".N225", "TSM": "TSM", USDTWD: "TWD=", USDJPY: "JPY=", EURUSD: "EUR=", USDCNY: "CNY=" };
+const FX_PAIRS = [["USDTWD", "美元兌新台幣", 3], ["USDJPY", "美元兌日圓", 3], ["EURUSD", "歐元兌美元", 5], ["USDCNY", "美元兌人民幣", 4]];
 const cnbcSym = s => CNBC_SYM[s] || (/\.T$/.test(s) ? s.replace(/\.T$/, "-JP") : s);
-const INTRA_SYMS = ["^GSPC", "^SOX", "^IXIC", "TSM", "^N225"];
+const INTRA_SYMS = ["^GSPC", "^SOX", "^IXIC", "TSM", "^N225", "USDTWD", "USDJPY", "EURUSD", "USDCNY"];
 function findQuotes(obj, out = []) {
   if (Array.isArray(obj)) obj.forEach(x => findQuotes(x, out));
   else if (obj && typeof obj === "object") {
@@ -644,7 +645,10 @@ async function cnbcQuotes(syms) {
       const prevClose = toNum(field(o, ["previous_day_closing", "previousDayClosing", "prev_close"]));
       let chgPct = toNum(String(field(o, ["change_pct", "changePct", "change_percent"]) || "").replace("%", ""));
       chgPct = chgPct != null ? chgPct / 100 : (prevClose ? last / prevClose - 1 : null);
+      const tsm = lt.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?)([+-]\d{2}):?(\d{2})$/);
+      const ts = tsm ? Date.parse(`${tsm[1]}${tsm[2]}:${tsm[3]}`) : NaN;
       res[mine] = { last, changePct: chgPct, change: toNum(field(o, ["change"])), prevClose, volume: toNum(field(o, ["volume"])),
+        o: toNum(field(o, ["open"])), h: toNum(field(o, ["high"])), l: toNum(field(o, ["low"])), ts: Number.isFinite(ts) ? ts : null,
         date: m ? m[1] : tpeToday(), t: m ? m[2] : null, name: field(o, ["name", "onAirName"]) };
     }
     await sleep(300);
@@ -662,8 +666,13 @@ function recordQuotes(qs) {
     if (q.prevClose) e.prev = { ...(e.prev || {}), [q.date]: q.prevClose };
     if (q.t && INTRA_SYMS.includes(sym)) {
       const day = e.intra[q.date] = e.intra[q.date] || [];
-      if (!day.some(p => p.t === q.t)) { day.push({ t: q.t, v: q.last }); added++; }
+      if (!day.some(p => p.t === q.t)) { day.push({ t: q.t, v: q.last, ...(q.ts ? { ts: q.ts } : {}) }); added++; }
       day.sort((a, b) => (a.t < b.t ? -1 : 1));
+    }
+    if (q.o != null && q.h != null && q.l != null) {
+      e.ohlc = e.ohlc || {};
+      e.ohlc[q.date] = { o: q.o, h: Math.max(q.h, q.last), l: Math.min(q.l, q.last), c: q.last };
+      for (const d of Object.keys(e.ohlc)) if (d < addDays(q.date, -90)) delete e.ohlc[d];
     }
     for (const d of Object.keys(e.daily)) if (d < addDays(q.date, -200)) delete e.daily[d];
     for (const d of Object.keys(e.intra)) if (d < addDays(q.date, -4)) delete e.intra[d];
@@ -680,8 +689,19 @@ function cnbcIntraday(sym) {
   const d = Object.keys(e.intra).sort().at(-1);
   const pts = d ? e.intra[d] : [];
   if (!pts || pts.length < 2) return null;
-  return { date: d, points: pts, prevClose: e.prev && e.prev[d] ? e.prev[d] : null, src: "CNBC（約每 15 分鐘取樣）", live: true };
+  return { date: d, points: pts, prevClose: e.prev && e.prev[d] ? e.prev[d] : null, src: "CNBC（約每 10–15 分鐘取樣）", live: true };
 }
+// 外匯今日 K 棒（開高低收）與近期日 K
+function fxCandles(qs) {
+  return FX_PAIRS.map(([pair, name, dp]) => {
+    const q = qs[pair], e = cache.cq && cache.cq[pair];
+    const hist = e && e.ohlc ? Object.keys(e.ohlc).sort().slice(-30).map(d => ({ date: d, ...e.ohlc[d] })) : [];
+    const today = q && q.o != null ? { date: q.date, o: q.o, h: Math.max(q.h ?? q.last, q.last), l: Math.min(q.l ?? q.last, q.last), c: q.last, ts: q.ts } : (hist.at(-1) || null);
+    const it = cnbcIntraday(pair);
+    return { pair, name, dp, today, prevClose: q ? q.prevClose : null, changePct: q ? q.changePct : null, hist, intraday: it };
+  }).filter(x => x.today);
+}
+
 // 若報價日期比歷史資料新，補上最新一筆
 function withQuote(bars, q) {
   if (!q) return bars;
@@ -742,7 +762,7 @@ function futLive(kind) {
   const list = Object.entries(cache.fut || {}).filter(([k, e]) => k.startsWith(kind + ":") && e.points.length > 1 && Date.now() - Date.parse(e.updated) < 20 * 3600e3);
   if (!list.length) return null;
   const [k, e] = list.sort((a, b) => (a[0] < b[0] ? 1 : -1))[0];
-  return { start: k.split(":")[1], points: e.points, prevClose: e.ref, src: "期交所即時行情（約每 10–15 分鐘取樣）", live: true };
+  return { start: k.split(":")[1], date: k.split(":")[1], points: e.points, prevClose: e.ref, src: "期交所即時行情（約每 10–15 分鐘取樣）", live: true, tz: "Asia/Taipei", overnight: kind === "night" };
 }
 
 /* ---------- 盤中模式：台股、日股、美股的今日走勢取樣 ---------- */
@@ -789,6 +809,7 @@ if (process.argv.includes("--intraday")) {
         u.bars = withQuote(u.bars || [], q);
         const it = cnbcIntraday(u.sym); if (it) u.intraday = it;
       });
+      latest.fxk = fxCandles(qs);
       if (latest.jp && qs["^N225"]) {
         const q = qs["^N225"], j = latest.jp;
         j.index.last = q.last; j.index.change = q.changePct; j.index.date = q.date; j.src = "CNBC";
@@ -825,7 +846,7 @@ process.on("unhandledRejection", emergencyWrite);
 let prevOut = null;
 try { prevOut = JSON.parse(await fs.readFile(OUT_PATH, "utf8")); } catch {}
 const out = {
-  version: "2026-11-07a",
+  version: "2026-11-09b",
   updatedAt: new Date().toISOString(), asOf: null,
   tw: null, taifex: null, twTop: null, foreign: [], margin: null, marginPeak: null,
   us: [], usTop: [], jp: null, jpTop: [], fx: null, news: { tw: [], us: [], jp: [], fx: [] }, signals: [],
@@ -855,7 +876,17 @@ try {
   const recent = bars.slice(-120);
   const peak = recent.reduce((a, b) => (b.c > a.c ? b : a), recent[0]);
   const n = bars.length;
-  out.tw = { src, bars: bars.slice(-60).map(({ v, ...b }) => b), ma20: ma20.slice(-60), ma120: ma120.slice(-60), last: bars[n - 1], change: n > 1 ? pctChg(bars[n - 1].c, bars[n - 2].c) : null, peak };
+  // RSI(14) 與月線乖離率，用來判斷超買或超賣
+  let rsi = null;
+  if (bars.length > 15) {
+    let gain = 0, loss = 0;
+    for (let i = 1; i <= 14; i++) { const d = bars[i].c - bars[i - 1].c; if (d > 0) gain += d; else loss -= d; }
+    gain /= 14; loss /= 14;
+    for (let i = 15; i < bars.length; i++) { const d = bars[i].c - bars[i - 1].c; gain = (gain * 13 + Math.max(d, 0)) / 14; loss = (loss * 13 + Math.max(-d, 0)) / 14; }
+    rsi = loss === 0 ? 100 : round(100 - 100 / (1 + gain / loss), 1);
+  }
+  const bias20 = ma20.at(-1) ? round((bars.at(-1).c / ma20.at(-1) - 1) * 100, 2) : null;
+  out.tw = { src, rsi14: rsi, bias20, bars: bars.slice(-60).map(({ v, ...b }) => b), ma20: ma20.slice(-60), ma120: ma120.slice(-60), last: bars[n - 1], change: n > 1 ? pctChg(bars[n - 1].c, bars[n - 2].c) : null, peak };
   out.asOf = bars[n - 1].date;
   try {
     const { v: intra, src: isrc } = await firstOk("加權指數盤中", [
@@ -869,6 +900,9 @@ try {
     ]);
     out.tw.intraday = { ...intra, src: isrc, prevClose: n > 1 ? bars[n - 2].c : null };
   } catch (e) { errors.push("加權指數今日走勢：" + errText(e)); }
+  // 若本次只取得稀疏的取樣，但上次已有同一天證交所完整的每分鐘資料，沿用上次的完整資料
+  const pi = prevOut && prevOut.tw && prevOut.tw.intraday;
+  if (pi && pi.date === out.asOf && pi.src === "臺灣證券交易所" && (!out.tw.intraday || out.tw.intraday.src !== "臺灣證券交易所")) out.tw.intraday = pi;
 } catch (e) { errors.push("加權指數：" + errText(e)); }
 
 try {
@@ -887,8 +921,9 @@ try {
 try { out.twTop = await fetchTwTop(); } catch (e) { errors.push("台股成交排行：" + errText(e)); }
 
 // 融資與外資（證交所）
-const m = await series("m", fetchMargin, 1);
+const m = await series("m", fetchMargin, 2);
 out.margin = m.at(-1) || null;
+if (out.margin && m.length > 1) out.margin.prev = m.at(-2).value;
 if (out.tw) {
   const pv = await getDay("m", out.tw.peak.date, fetchMargin);
   if (pv != null) out.marginPeak = { date: out.tw.peak.date, value: pv };
@@ -917,7 +952,7 @@ for (const it of CFG.US) {
           ["Stooq", () => stooqIntraday(it.sym, "America/New_York")],
         ]);
         const pc = intra.prevClose || (bars.filter(b => b.date < intra.date).at(-1) || {}).c || null;
-        item.intraday = { ...intra, src: intra.src || isrc, prevClose: pc };
+        item.intraday = { ...intra, src: intra.src || isrc, prevClose: pc, tz: "America/New_York" };
       } catch (e) { errors.push(it.name + "今日走勢：" + errText(e)); }
     }
     out.us.push(item);
@@ -945,10 +980,38 @@ try {
       ["Stooq", () => stooqIntraday("^N225", "Asia/Tokyo")],
     ]);
     const prev = nb2.filter(b => b.date < it.date).at(-1);
-    out.jp.intraday = { ...it, src: it.src || isrc, prevClose: it.prevClose || (prev ? prev.c : null) };
+    out.jp.intraday = { ...it, src: it.src || isrc, prevClose: it.prevClose || (prev ? prev.c : null), tz: "Asia/Tokyo" };
   } catch (e) { errors.push("日經 225 今日走勢：" + errText(e)); }
 } catch (e) { errors.push("日股指數：" + errText(e)); }
 out.jpTop = await watchTop(CFG.JP_WATCH, "日股熱門股");
+
+// 外匯今日 K 棒（CNBC）
+try {
+  const fq = await cnbcQuotes(FX_PAIRS.map(x => x[0]));
+  recordQuotes(fq);
+  out.fxk = fxCandles(fq);
+} catch (e) { errors.push("外匯 K 棒：" + errText(e)); }
+
+// 大盤成交金額（證交所每日市場成交資訊）
+try {
+  const ym = ymd(tpeToday()).slice(0, 6);
+  const rows = [];
+  for (const d of [addDays(tpeToday(), -35), tpeToday()]) {
+    const dd = ymd(d);
+    let j = null;
+    for (const u of [`https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date=${dd}&response=json`, `https://www.twse.com.tw/exchangeReport/FMTQIK?response=json&date=${dd}`]) {
+      try { j = await getJSON(u); if (j && (!j.stat || j.stat === "OK")) break; } catch {}
+      j = null;
+    }
+    if (j) allRows(j).forEach(r => { if (/^\d{2,3}\/\d{2}\/\d{2}$/.test(String(r[0]).trim())) { const [y, mo, da] = String(r[0]).trim().split("/"); rows.push({ date: `${Number(y) + 1911}-${mo}-${da}`, value: toNum(r[2]) }); } });
+    await sleep(CFG.TWSE_DELAY_MS);
+  }
+  const uniq = Object.values(Object.fromEntries(rows.filter(r => r.value).map(r => [r.date, r]))).sort((a, b) => (a.date < b.date ? -1 : 1));
+  if (uniq.length) {
+    const lastT = uniq.at(-1), prev5 = uniq.slice(-6, -1);
+    out.turnover = { date: lastT.date, value: round(lastT.value / 1e8, 0), avg5: prev5.length ? round(prev5.reduce((a, b) => a + b.value, 0) / prev5.length / 1e8, 0) : null };
+  } else errors.push("大盤成交金額：無資料");
+} catch (e) { errors.push("大盤成交金額：" + errText(e)); }
 
 // 匯率與波動度（20 日年化歷史波動率）
 try {
