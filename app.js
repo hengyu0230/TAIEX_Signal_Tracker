@@ -50,7 +50,7 @@
   // 折線圖：自動略過休市或缺值的點，縱軸依資料範圍自動放大
   function lineChart(points, opt) {
     opt = opt || {};
-    var pts = (points || []).map(function (p) { return { d: p.date, t: p.t, v: n(p.v) }; }).filter(function (p) { return p.v != null && (opt.allowZero || p.v > 0); });
+    var pts = (points || []).map(function (p) { return { d: p.date, t: p.t, lb: p.lb, v: n(p.v) }; }).filter(function (p) { return p.v != null && (opt.allowZero || p.v > 0); });
     if (pts.length < 2) return opt.fallback || '<p class="empty">' + esc(opt.empty || "資料不足。") + "</p>";
     var W = opt.w || 440, H = opt.h || 170, pl = 52, pr = 6, pt = 8, pb = 20;
     var vs = pts.map(function (p) { return p.v; });
@@ -64,7 +64,7 @@
     var c = opt.cls;
     if (!c) c = (n(opt.base) != null ? pts[pts.length - 1].v >= n(opt.base) : pts[pts.length - 1].v >= pts[0].v) ? "l-up" : "l-down";
     s += '<polyline points="' + line + '" class="' + c + '"/>';
-    var lab = opt.xlab || function (p) { return p.t || (p.d ? String(p.d).slice(5) : ""); };
+    var lab = opt.xlab || function (p) { return p.lb || p.t || (p.d ? String(p.d).slice(5) : ""); };
     if (pts.length <= 8) {
       // 資料點少（例如本週）：每一點都標示日期，並以圓點表示
       pts.forEach(function (p, i) {
@@ -124,6 +124,21 @@
   }
 
   /* ---------- 區塊 ---------- */
+  // 大盤總整理：成交金額、融資、外資、超買超賣
+  function summaryHtml(d) {
+    var t = d.turnover, m = d.margin, f = (d.foreign || [])[(d.foreign || []).length - 1], tw = d.tw || {};
+    var cells = [];
+    cells.push(["成交金額", t ? fmt(t.value) + " 億" : "—", t && t.avg5 ? "較 5 日均量 " + pct(t.value / t.avg5 - 1) : (t ? esc(String(t.date).slice(5)) : "資料未取得"), t && t.avg5 ? cls(t.value / t.avg5 - 1) : ""]);
+    var md = m && m.prev != null ? n(m.value) - n(m.prev) : null;
+    cells.push(["融資餘額", m ? fmt(m.value) + " 億" : "—", md != null ? "單日 " + sgn(md, 1) + " 億" : (m ? esc(String(m.date).slice(5)) : "資料未取得"), cls(md)]);
+    cells.push(["外資", f ? (f.value >= 0 ? "買超 " : "賣超 ") + fmt(Math.abs(f.value), 1) + " 億" : "—", f ? (f.value >= 0 ? "資金流入" : "資金流出") + "｜" + esc(String(f.date).slice(5)) : "資料未取得", f ? cls(f.value) : ""]);
+    var r = n(tw.rsi14), st = r == null ? "—" : r >= 70 ? "超買" : r <= 30 ? "超賣" : "中性";
+    cells.push(["超買／超賣", st, (r != null ? "RSI(14) " + r.toFixed(1) : "RSI 資料不足") + (n(tw.bias20) != null ? "｜月線乖離 " + sgn(tw.bias20, 1) + "%" : ""), st === "超買" ? "up" : st === "超賣" ? "down" : ""]);
+    return '<div class="summary">' + cells.map(function (c) {
+      return '<div><small>' + c[0] + '</small><b class="num ' + (c[0] === "超買／超賣" ? c[3] : "") + '">' + c[1] + '</b><span class="num ' + (c[0] !== "超買／超賣" ? c[3] : "") + '">' + c[2] + "</span></div>";
+    }).join("") + "</div>";
+  }
+
   function lampsHtml(d, which) {
     var open = which === "desk" ? UI.lampDesk : UI.lampMob;
     var s = '<div class="lamps" role="group" aria-label="四項止跌訊號">';
@@ -136,7 +151,7 @@
     if (sel) s += '<div class="detail"><b>' + esc(sel.name) + "：" + esc(STATES[sel.state] || STATES.na) + "</b><p>目前：" + esc(sel.text) + "</p><p>" + esc(sel.rule || "資料不足時無法判斷。") + "</p></div>";
     var c = Math.max(0, Math.min(4, parseInt(d.count, 10) || 0));
     s += '<div class="verdict"><span class="big num">' + c + '<span class="muted" style="font-size:15px"> / 4</span></span><span class="mid">' + esc(d.verdict) + "</span></div>";
-    return s;
+    return s + summaryHtml(d);
   }
 
   function twFb(d) {
@@ -162,8 +177,8 @@
 
   function futCard(title, sub, f, hist, emptyNote, extra, live) {
     var chart = live && live.points && live.points.length > 1
-      ? '<p class="muted" style="font-size:11px;margin:2px 0 4px">盤中走勢（' + esc(String(live.start || "").slice(5)) + " 起，約每 10–15 分鐘取樣；最新 " + esc(live.points[live.points.length - 1].t) + " " + fmt(live.points[live.points.length - 1].v) + "）</p>" +
-        lineChart(live.points.map(function (p) { return { t: p.t, v: p.v }; }), { h: 130, dp: 0, base: live.prevClose, baseLabel: "參考價", label: title + "盤中走勢" })
+      ? '<p class="muted" style="font-size:11px;margin:2px 0 4px">盤中取樣（' + esc(rangeNote(live)) + "；最新 " + fmt(live.points[live.points.length - 1].v) + "）</p>" +
+        lineChart(labeled(live), { h: 130, dp: 0, base: live.prevClose, baseLabel: "參考價", label: title + "盤中走勢" })
       : hist && hist.length > 1 ? lineChart(hist.map(function (b) { return { date: b.date, v: b.c }; }), { h: 120, dp: 0, label: title + "近期走勢" })
       : closeBox("最終收盤", f.date, f.last, f.changePct, 0, f.last != null && f.change != null ? n(f.last) - n(f.change) : null);
     return '<div class="ucard"><div class="h"><h2>' + esc(title) + "</h2><span>" + esc(sub) + "</span></div>" +
@@ -181,12 +196,35 @@
     return h + "</div>";
   }
 
+  // 盤中時間一律換算為台灣時間，並標示日期（夜盤、美股跨日時不易誤判）
+  function tzOffMin(ms, tz) {
+    try {
+      var p = {}; new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).formatToParts(new Date(ms)).forEach(function (x) { p[x.type] = x.value; });
+      return (Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute) - ms) / 60000;
+    } catch (e) { return 480; }
+  }
+  function tpeLabel(ms) { var d = new Date(ms + 8 * 36e5); return (d.getUTCMonth() + 1) + "/" + String(d.getUTCDate()).padStart(2, "0") + " " + String(d.getUTCHours()).padStart(2, "0") + ":" + String(d.getUTCMinutes()).padStart(2, "0"); }
+  function pointMs(it, p) {
+    if (p.ts) return p.ts;
+    var day = it.start || it.date; if (!day || !p.t) return null;
+    if (it.overnight && p.t < "12:00") { var d0 = new Date(day + "T00:00:00Z"); d0.setUTCDate(d0.getUTCDate() + 1); day = d0.toISOString().slice(0, 10); }
+    var naive = Date.parse(day + "T" + p.t + ":00Z");
+    return naive - tzOffMin(naive, it.tz || "Asia/Taipei") * 60000;
+  }
+  function labeled(it) {
+    return (it.points || []).map(function (p) { var ms = pointMs(it, p); return { t: p.t, v: p.v, lb: ms ? tpeLabel(ms) : p.t }; });
+  }
+  function rangeNote(it) {
+    var ps = labeled(it); if (!ps.length) return "";
+    return "台灣時間 " + ps[0].lb + " 至 " + ps[ps.length - 1].lb;
+  }
+
   function intradayHtml(it, name, fb) {
     if (!it || !it.points || it.points.length < 2) return closeBox("最終收盤", fb && fb.date, fb && fb.value, fb && fb.change, 2, fb && fb.prev);
     var last = it.points[it.points.length - 1].v, base = n(it.prevClose);
     var chg = base ? last / base - 1 : null;
-    return '<p class="muted" style="margin:0 0 6px;font-size:12px">' + esc(it.date || "") + "　" + esc(name) + (it.live ? " 盤中（約每 10 分鐘更新）" : " 盤中") + "，虛線為前一交易日收盤" + (base ? " " + fmt(base, 2) : "") + (chg != null ? '，收盤 <span class="' + cls(chg) + '">' + pct(chg) + "</span>" : "") + "</p>" +
-      lineChart(it.points.map(function (p) { return { t: p.t, v: p.v }; }), { h: 190, base: base, baseLabel: "前收", label: name + "今日走勢" });
+    return '<p class="muted" style="margin:0 0 6px;font-size:12px">' + esc(name) + (it.live ? " 盤中取樣" : " 盤中") + "（" + esc(rangeNote(it)) + "）" + "，虛線為前一交易日收盤" + (base ? " " + fmt(base, 2) : "") + (chg != null ? '，收盤 <span class="' + cls(chg) + '">' + pct(chg) + "</span>" : "") + "</p>" +
+      lineChart(labeled(it), { h: 190, base: base, baseLabel: "前收", label: name + "今日走勢" });
   }
 
   function k3mHtml(d) {
@@ -220,7 +258,7 @@
     var r = UI.usRange, chart;
     if (r === "d") {
       chart = u.intraday && u.intraday.points && u.intraday.points.length > 1
-        ? lineChart(u.intraday.points.map(function (p) { return { t: p.t, v: p.v }; }), { h: 130, dp: 0, base: u.intraday.prevClose, baseLabel: "前收", label: u.name + "今日走勢" })
+        ? '<p class="muted" style="font-size:11px;margin:2px 0 4px">' + esc(rangeNote(u.intraday)) + "</p>" + lineChart(labeled(u.intraday), { h: 130, dp: 0, base: u.intraday.prevClose, baseLabel: "前收", label: u.name + "今日走勢" })
         : closeBox("最終收盤", u.date, u.last, u.change, 2, prevOf(u.bars));
     } else {
       var b = inRange(u.bars || [], r);
@@ -265,6 +303,47 @@
     }
     return '<div class="stat"><span class="big num">' + fmt(j.index.last, 2) + '</span><span class="chg ' + cls(jchg) + '">' + pct(jchg) + '</span><span class="muted">日經 225｜' + md(j.index.date) + (j.src === "FRED" ? "（FRED，約延遲 1 個交易日）" : "") + "</span></div>" +
       '<div class="kv"><div><b class="num">' + fmt(j.usdjpy && j.usdjpy.last, 2) + '</b><small>美元兌日圓</small></div><div><b class="num ' + cls(j.usdjpy && j.usdjpy.change) + '">' + pct(j.usdjpy && j.usdjpy.change) + '</b><small>日圓匯率變動</small></div><div><b class="num">' + esc(j.src || "—") + "</b><small>資料來源</small></div></div>" + chart;
+  }
+
+  // 外匯今日 K 棒
+  function candleSvg(k, dp) {
+    var o = n(k.o), h = n(k.h), l = n(k.l), c = n(k.c);
+    if ([o, h, l, c].some(function (x) { return x == null; })) return "";
+    var H = 150, W = 120, pad = 12, rng = (h - l) || Math.abs(c) * 0.0005 || 1;
+    function Y(v) { return pad + (h - v) / rng * (H - pad * 2); }
+    var up = c >= o, k2 = up ? "up" : "down", top = Y(Math.max(o, c)), bot = Y(Math.min(o, c));
+    var s = '<svg viewBox="0 0 ' + W + " " + H + '" class="candle" role="img" aria-label="今日 K 棒：開 ' + fmt(o, dp) + "，高 " + fmt(h, dp) + "，低 " + fmt(l, dp) + "，收 " + fmt(c, dp) + '">';
+    s += '<line x1="30" x2="30" y1="' + Y(h).toFixed(1) + '" y2="' + Y(l).toFixed(1) + '" class="s-' + k2 + '" stroke-width="2"/>';
+    s += '<rect x="16" y="' + top.toFixed(1) + '" width="28" height="' + Math.max(2, bot - top).toFixed(1) + '" class="f-' + k2 + '"/>';
+    // 標籤依價位排列，彼此至少相隔 13 單位，避免重疊
+    var labs = [["高", h], ["開", o], ["收", c], ["低", l]].map(function (x) { return { t: x[0] + " " + fmt(x[1], dp), y: Y(x[1]) + 4 }; }).sort(function (a, b) { return a.y - b.y; });
+    for (var i = 1; i < labs.length; i++) if (labs[i].y - labs[i - 1].y < 13) labs[i].y = labs[i - 1].y + 13;
+    var over = labs[labs.length - 1].y - (H - 2); if (over > 0) labs.forEach(function (x) { x.y -= over; });
+    for (var j = labs.length - 2; j >= 0; j--) if (labs[j + 1].y - labs[j].y < 13) labs[j].y = labs[j + 1].y - 13;
+    labs.forEach(function (x) { s += '<text x="52" y="' + x.y.toFixed(1) + '" class="ax">' + x.t + "</text>"; });
+    return s + "</svg>";
+  }
+  function fxKCard(x) {
+    var k = x.today, dp = x.dp || 3, o = n(k.o), h = n(k.h), l = n(k.l), c = n(k.c);
+    var chg = n(x.changePct) != null ? x.changePct : (n(x.prevClose) ? c / x.prevClose - 1 : null);
+    var pos = h > l ? Math.round((c - l) / (h - l) * 100) : null;
+    var amp = l ? (h - l) / l : null;
+    var hist = (x.hist || []).filter(function (b) { return b.o != null; });
+    var sub;
+    if (x.intraday && x.intraday.points && x.intraday.points.length > 1) sub = '<p class="muted" style="font-size:11px;margin:6px 0 2px">今日走勢（' + esc(rangeNote(x.intraday)) + "）</p>" + lineChart(labeled(x.intraday), { h: 110, dp: dp, base: x.prevClose, baseLabel: "前收", label: x.name + "今日走勢" });
+    else if (hist.length > 1) sub = '<p class="muted" style="font-size:11px;margin:6px 0 2px">近 ' + hist.length + " 日 K 線</p>" + kChart({ bars: hist, ma20: [], ma120: [] }, 120).replace(/<div class="legend">[\s\S]*<\/div>$/, "");
+    else sub = '<p class="muted" style="font-size:11px;margin:6px 0 0">今日走勢將於盤中取樣後顯示。</p>';
+    return '<div class="ucard fxk"><div class="h"><h2>' + esc(x.name) + "</h2><span>" + esc(String(k.date || "").slice(5)) + (k.ts ? "　" + esc(tpeLabel(k.ts).slice(-5)) + " 台灣時間" : "") + "</span></div>" +
+      '<div class="fxk-row">' + candleSvg(k, dp) + '<div class="fxk-num"><div class="stat"><span class="big num">' + fmt(c, dp) + '</span><span class="chg ' + cls(chg) + '">' + pct(chg) + "</span></div>" +
+      '<div class="fxk-grid num"><span>開 ' + fmt(o, dp) + "</span><span>高 " + fmt(h, dp) + "</span><span>低 " + fmt(l, dp) + "</span><span>前收 " + fmt(x.prevClose, dp) + "</span></div>" +
+      '<div class="muted" style="font-size:12px">振幅 ' + (amp != null ? (amp * 100).toFixed(2) + "%" : "—") + "</div>" +
+      (pos != null ? '<div class="rangebar" title="目前價位在今日高低區間的位置"><i style="left:' + pos + '%"></i></div><div class="muted" style="font-size:11px">位於今日區間 ' + pos + "%（0% 為最低、100% 為最高）</div>" : "") +
+      "</div></div>" + sub + "</div>";
+  }
+  function fxKHtml(d) {
+    var list = d.fxk || [];
+    if (!list.length) return '<p class="empty">今日 K 棒資料未取得（資料來源暫時無法連線）。</p>';
+    return '<div class="ucards">' + list.map(fxKCard).join("") + "</div>";
   }
 
   function fxMain(d, compact) {
@@ -340,7 +419,7 @@
       '<div class="blk">' + head("日本財經新聞") + newsHtml(d.news && d.news.jp, 4) + "</div>" +
       "</section></div>";
     h += '<hr class="dash">';
-    h += '<section><div class="region-row"><div class="region">匯率</div><span class="h-note">' + esc(fxNote(d)) + "</span>" + rangeSeg("fx", FX_RANGES, UI.fxRange) + '</div><div class="fx-grid">' +
+    h += '<section><div class="region-row"><div class="region">匯率</div><span class="h-note">' + esc(fxNote(d)) + "</span>" + rangeSeg("fx", FX_RANGES, UI.fxRange) + '</div><div class="blk">' + head("今日 K 棒", "開高低收，資料來源 CNBC") + fxKHtml(d) + '</div><div class="fx-grid">' +
       "<div>" + head("新台幣兌美元") + (fx.rate || fx) + "</div>" +
       "<div>" + head("匯率波動度", "20 日年化歷史波動率") + (fx.vol || "") + "</div>" +
       "<div>" + head("其他主要匯率") + fxOthers(d) + '<div class="blk" style="margin-top:16px">' + head("匯率新聞") + newsHtml(d.news && d.news.fx, 3) + "</div></div>" +
@@ -374,6 +453,7 @@
       h += '<div class="blk">' + head("新聞") + newsHtml(d.news && d.news.jp, 8) + "</div>";
     } else {
       var fx = fxMain(d, true);
+      h += '<div class="blk">' + head("今日 K 棒", "資料來源 CNBC") + fxKHtml(d) + "</div>";
       h += '<div class="blk">' + head("新台幣兌美元", fxNote(d)) + rangeSeg("fx", FX_RANGES, UI.fxRange) + (fx.rate || fx) + "</div>";
       h += '<div class="blk">' + head("匯率波動度", "20 日年化歷史波動率") + (fx.vol || "") + "</div>";
       h += '<div class="blk">' + head("其他主要匯率") + fxOthers(d) + "</div>";
@@ -383,15 +463,27 @@
     $("mob").innerHTML = h;
   }
 
+  // 計算兩個時間之間的「平日」小時數（以台灣時間計，週六、週日不計），避免週末誤報
+  function weekdayHours(from, to) {
+    if (!from || to <= from) return 0;
+    var h = 0, step = 36e5;
+    for (var t = from; t < to; t += step) {
+      var wd = new Date(t + 8 * 36e5).getUTCDay();
+      if (wd !== 0 && wd !== 6) h += Math.min(step, to - t) / 36e5;
+    }
+    return h;
+  }
+
   function render() {
     if (!DATA) return;
     renderDesk(DATA); renderMob(DATA);
     $("legal").innerHTML = '<hr class="solid">' + legalHtml(DATA);
     renderTV();
-    $("stamp").textContent = "資料 " + (DATA.asOf ? DATA.asOf.slice(5).replace("-", "/") : "—") + "｜更新 " + time(DATA.updatedAt);
-    var hours = (Date.now() - new Date(DATA.updatedAt).getTime()) / 36e5, w = $("warn");
+    var lastT = Math.max(Date.parse(DATA.updatedAt) || 0, Date.parse(DATA.intradayAt) || 0);
+    $("stamp").textContent = "資料 " + (DATA.asOf ? DATA.asOf.slice(5).replace("-", "/") : "—") + "｜更新 " + time(new Date(lastT).toISOString());
+    var hours = weekdayHours(lastT, Date.now()), w = $("warn");
     var stale = (DATA.stale || []).filter(function (x) { return !/^新聞/.test(x); });
-    if (hours > 30) { w.textContent = "資料已超過 " + Math.floor(hours) + " 小時未更新，可能遇到假日或排程暫停。"; w.hidden = false; }
+    if (hours > 26) { w.textContent = "資料已有一段時間未更新（最後更新 " + time(new Date(lastT).toISOString()) + "），排程可能延遲或暫停。"; w.hidden = false; }
     else if (stale.length) { w.textContent = "以下項目本次未能更新，暫時沿用上次取得的資料：" + stale.join("、"); w.hidden = false; }
     else w.hidden = true;
     document.documentElement.style.setProperty("--bar-h", $("bar").offsetHeight + "px");

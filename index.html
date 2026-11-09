@@ -91,6 +91,20 @@ svg{display:block;width:100%;height:auto}
 .tvcell{border:1px solid var(--line);border-radius:4px;padding:12px 14px}
 .tvframe{height:180px}
 @media (max-width:899px){.tvwrap,.legalwrap{padding:0 14px}.tvgrid{grid-template-columns:1fr}.legalwrap .solid{margin:10px 0 16px}}
+.summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border:1px solid var(--line);border-radius:4px;margin-top:14px}
+.summary>div{padding:10px 12px;display:flex;flex-direction:column;gap:2px}
+.summary>div+div{border-left:1px solid var(--line)}
+.summary small{color:var(--faint);font-size:11px}
+.summary b{font-size:16px}
+.summary span{font-size:11px;color:var(--muted)}
+.summary span.up{color:var(--up)}.summary span.down{color:var(--down)}
+.fxk-row{display:flex;gap:10px;align-items:center}
+.candle{width:120px;flex:none}
+.fxk-num{flex:1;min-width:0}
+.fxk-grid{display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;font-size:12px;color:var(--muted);margin:6px 0}
+.rangebar{position:relative;height:6px;border-radius:3px;background:linear-gradient(90deg,var(--down),var(--line),var(--up));margin:8px 0 4px}
+.rangebar i{position:absolute;top:-3px;width:3px;height:12px;background:var(--ink);transform:translateX(-50%)}
+@media (max-width:899px){.summary{grid-template-columns:1fr 1fr}.summary>div:nth-child(3){border-left:0}.summary>div:nth-child(n+3){border-top:1px solid var(--line)}}
 .night{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;margin-top:10px;padding:10px 0 0;border-top:1px solid var(--line-soft);font-size:13px}
 .night b{font-size:16px}
 .rseg{display:inline-flex;border:1px solid var(--line);border-radius:4px;overflow:hidden;flex:none}
@@ -160,9 +174,10 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   .mob{display:block}
   .ucards{grid-template-columns:1fr;gap:12px}
   .bar{padding-left:14px;padding-right:14px}
-  .bar h1{font-size:14px}
-  .bar .stamp{font-size:11px;line-height:1.3}
-  #btn-refresh{display:none}
+  .bar{flex-wrap:wrap;padding-top:calc(env(safe-area-inset-top,0px) + 18px);row-gap:4px}
+  .bar h1{font-size:15px;flex:1}
+  .bar .stamp{font-size:11px;line-height:1.3;order:3;flex-basis:100%}
+  .icon-btn{padding:5px 9px;font-size:12px}
 }
 .tabs{position:sticky;top:var(--bar-h,52px);z-index:4;display:grid;grid-template-columns:repeat(4,1fr);background:var(--bg);border-bottom:1px solid var(--line);padding:8px 14px}
 .tabs button{background:transparent;border:1px solid var(--line);padding:7px 0;font-size:13px;cursor:pointer;color:var(--muted)}
