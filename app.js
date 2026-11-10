@@ -154,12 +154,57 @@
     return s + summaryHtml(d);
   }
 
+  // 把盤中取樣（data/intraday.json）疊加到完整資料上
+  function mergeIntraday(D, I) {
+    if (!I) return D;
+    D.intradayAt = I.at; D.intradayErrors = I.errors || [];
+    if (D.tw && I.tw && I.tw.intraday && I.tw.intraday.points && I.tw.intraday.points.length > 1) {
+      var cur = D.tw.intraday, it = I.tw.intraday;
+      if (!cur || it.date > cur.date || (it.date === cur.date && cur.src !== "臺灣證券交易所")) D.tw.intraday = it;
+    }
+    if (D.taifex && I.taifex) {
+      if (I.taifex.liveDay) D.taifex.liveDay = I.taifex.liveDay;
+      if (I.taifex.liveNight) D.taifex.liveNight = I.taifex.liveNight;
+    }
+    var Q = I.quotes || {}, IT = I.intra || {};
+    (D.us || []).forEach(function (u) {
+      var q = Q[u.sym];
+      if (q && (!u.date || q.date >= u.date)) {
+        u.last = q.last; u.change = q.changePct; if (q.date > (u.date || "")) { u.bars = (u.bars || []).concat([{ date: q.date, c: q.last }]); } else if (u.bars && u.bars.length) { u.bars[u.bars.length - 1].c = q.last; }
+        u.date = q.date; u.src = "CNBC";
+      }
+      if (IT[u.sym] && (!u.intraday || IT[u.sym].date >= u.intraday.date)) u.intraday = IT[u.sym];
+    });
+    if (D.jp && D.jp.index) {
+      var q = Q["^N225"], j = D.jp;
+      if (q && q.date >= (j.index.date || "")) {
+        j.index.last = q.last; j.index.change = q.changePct;
+        if (q.date > j.index.date) j.index.bars = (j.index.bars || []).concat([{ date: q.date, c: q.last }]);
+        j.index.date = q.date; j.src = "CNBC";
+      }
+      if (IT["^N225"] && (!j.intraday || IT["^N225"].date >= j.intraday.date)) j.intraday = IT["^N225"];
+    }
+    if (I.fxk && I.fxk.length) D.fxk = I.fxk;
+    return D;
+  }
+
+  function twDay(d) {
+    var it = d.tw && d.tw.intraday, day = d.asOf || "";
+    return it && it.date > day ? it.date + "（盤中）" : day;
+  }
   function twFb(d) {
     var tw = d.tw; if (!tw || !tw.last) return null;
     return { date: tw.last.date, value: tw.last.c, change: tw.change, prev: prevOf(tw.bars) };
   }
   function twStatsHtml(d) {
     var tw = d.tw; if (!tw) return '<p class="empty">指數資料未取得。</p>';
+    // 盤中取樣比收盤資料新時，大字改顯示盤中最新值
+    var it = tw.intraday;
+    if (it && it.points && it.points.length && tw.last && it.date > tw.last.date) {
+      var lp = it.points[it.points.length - 1], base = n(it.prevClose) || n(tw.last.c), lc = base ? n(lp.v) / base - 1 : null;
+      var lm = pointMs(it, lp);
+      return '<div class="stat"><span class="big num">' + fmt(lp.v, 2) + '</span><span class="chg ' + cls(lc) + '">' + pct(lc) + '</span><span class="muted">盤中 ' + (lm ? esc(tpeLabel(lm)) : esc(lp.t)) + "（前一交易日收盤 " + fmt(base, 2) + "）</span></div>";
+    }
     var m20 = (tw.ma20 || [])[tw.ma20.length - 1], m120 = (tw.ma120 || [])[tw.ma120.length - 1], c = n(tw.last && tw.last.c), f = d.taifex;
     function rel(m) { m = n(m); return m && c ? (c >= m ? "高於 " : "低於 ") + Math.abs((c / m - 1) * 100).toFixed(1) + "%" : "資料不足"; }
     return '<div class="stat"><span class="big num">' + fmt(c, 2) + '</span><span class="chg ' + cls(tw.change) + '">' + pct(tw.change) + "</span></div>" +
@@ -223,7 +268,7 @@
     if (!it || !it.points || it.points.length < 2) return closeBox("最終收盤", fb && fb.date, fb && fb.value, fb && fb.change, 2, fb && fb.prev);
     var last = it.points[it.points.length - 1].v, base = n(it.prevClose);
     var chg = base ? last / base - 1 : null;
-    return '<p class="muted" style="margin:0 0 6px;font-size:12px">' + esc(name) + (it.live ? " 盤中取樣" : " 盤中") + "（" + esc(rangeNote(it)) + "）" + "，虛線為前一交易日收盤" + (base ? " " + fmt(base, 2) : "") + (chg != null ? '，收盤 <span class="' + cls(chg) + '">' + pct(chg) + "</span>" : "") + "</p>" +
+    return '<p class="muted" style="margin:0 0 6px;font-size:12px">' + esc(name) + (it.live ? " 盤中取樣" : " 盤中") + "（" + esc(rangeNote(it)) + "）" + "，虛線為前一交易日收盤" + (base ? " " + fmt(base, 2) : "") + (chg != null ? (it.live ? '，最新 ' : '，收盤 ') + '<span class="' + cls(chg) + '">' + pct(chg) + "</span>" : "") + "</p>" +
       lineChart(labeled(it), { h: 190, base: base, baseLabel: "前收", label: name + "今日走勢" });
   }
 
@@ -385,7 +430,7 @@
       "<li>本網站資料取自公開來源並經程式自動整理，可能有延遲、遺漏或錯誤；實際數據以各資料來源之官方公告為準。</li>" +
       "<li>新聞標題與連結之著作權屬原刊登媒體所有，本網站僅提供索引，內容以原始報導為準。</li>" +
       "<li>本網站與下列資料來源機構無任何關聯，亦未獲其授權或背書。使用本網站即表示您已閱讀並同意上述聲明。</li>" +
-      '</ol><div class="src">資料來源：臺灣證券交易所、臺灣期貨交易所、美國聯準會經濟資料庫（FRED）、CNBC、Yahoo Finance、Google 新聞與各媒體 RSS；即時參考圖表由 TradingView 提供。本網站整理之資料並非即時報價。資料更新時間 ' + esc(time(d && d.updatedAt)) + "。資料程式版本 " + esc((d && d.version) || "舊版") + "。</div></div>";
+      '</ol><div class="src">資料來源：臺灣證券交易所、臺灣期貨交易所、美國聯準會經濟資料庫（FRED）、CNBC、Yahoo Finance、Google 新聞與各媒體 RSS；即時參考圖表由 TradingView 提供。本網站整理之資料並非即時報價。資料更新時間 ' + esc(time(d && d.updatedAt)) + "。資料程式版本 " + esc((d && d.version) || "舊版") + "。" + (d && d.intradayErrors && d.intradayErrors.length ? "盤中取樣問題：" + esc(d.intradayErrors.join("；")) + "。" : "") + "</div></div>";
   }
 
   /* ---------- 電腦版 ---------- */
@@ -396,7 +441,7 @@
     h += '<div class="cols even">';
     h += "<section>" +
       '<div class="blk">' + head("指示訊號", "點選燈號查看說明") + lampsHtml(d, "desk") + "</div>" +
-      '<div class="blk">' + head("加權指數｜今日走勢", (d.tw && d.tw.intraday ? d.tw.intraday.src : (d.tw && d.tw.src) || "")) + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數", twFb(d)) + "</div>" +
+      '<div class="blk">' + head("加權指數｜今日走勢", twDay(d)) + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數", twFb(d)) + "</div>" +
       '<div class="blk">' + futCardsHtml(d) + "</div>" +
       '<div class="blk">' + head("外資買賣超（億元）", "近 " + ((d.foreign || []).length) + " 個交易日") + barChart(d.foreign) + "</div>" +
       "</section>";
@@ -436,7 +481,7 @@
     var tt = d.twTop || {};
     if (UI.tab === "tw") {
       h += '<div class="blk">' + head("止跌訊號", "點選燈號查看說明") + lampsHtml(d, "mob") + "</div>";
-      h += '<div class="blk">' + head("加權指數｜今日走勢", d.asOf || "") + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數", twFb(d)) + "</div>";
+      h += '<div class="blk">' + head("加權指數｜今日走勢", twDay(d)) + twStatsHtml(d) + intradayHtml(d.tw && d.tw.intraday, "加權指數", twFb(d)) + "</div>";
       h += '<div class="blk">' + futCardsHtml(d) + "</div>";
       h += '<div class="blk">' + head("加權指數｜近 3 個月", "K 線與均線") + k3mHtml(d) + "</div>";
       h += '<div class="blk">' + head("外資買賣超（億元）") + barChart(d.foreign) + "</div>";
@@ -621,9 +666,10 @@
   /* ---------- 載入 ---------- */
   function load() {
     $("btn-refresh").disabled = true;
+    var getI = fetch("data/intraday.json?t=" + Date.now(), { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
     fetch("data/latest.json?t=" + Date.now(), { cache: "no-store" })
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-      .then(function (d) { DATA = d; render(); })
+      .then(function (d) { return getI.then(function (i) { DATA = mergeIntraday(d, i); render(); }); })
       .catch(function (e) {
         var msg = '<section style="padding:20px"><p>目前無法讀取資料（' + esc(e.message) + '）。若是第一次部署，請到 GitHub 的 Actions 頁面手動執行一次「更新市場資料」。</p></section>';
         $("desk").innerHTML = msg; $("mob").innerHTML = msg; $("stamp").textContent = "";
