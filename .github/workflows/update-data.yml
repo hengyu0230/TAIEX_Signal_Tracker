@@ -7,12 +7,20 @@ on:
     - cron: "45 13 * * 1-5"  # 台灣 21:45：融資
     - cron: "45 14 * * 1-5"  # 台灣 22:45：融資完整數據
     - cron: "30 22 * * 1-5"  # 台灣隔日 06:30：美股收盤、夜盤
-    - cron: "*/10 0-6 * * 1-5"   # 台灣 08:00–14:50：台股與日股盤中，每 10 分鐘取樣
-    - cron: "*/15 7-12 * * 1-5"  # 台灣 15:00–20:45：台指期夜盤，每 15 分鐘取樣
-    - cron: "*/15 13-21 * * 1-5" # 台灣 21:00–05:45：美股盤中與台指期夜盤，每 15 分鐘取樣
+    # 盤中取樣避開整點（GitHub 在整點最壅塞，較容易延遲或略過）
+    - cron: "4-59/10 0-6 * * 1-5"   # 台灣 08:04–14:54：台股與日股盤中，每 10 分鐘取樣
+    - cron: "7-59/15 7-12 * * 1-5"  # 台灣 15:07–20:52：台指期夜盤，每 15 分鐘取樣
+    - cron: "7-59/15 13-21 * * 1-5" # 台灣 21:07–05:52：美股盤中與台指期夜盤，每 15 分鐘取樣
   push:
     branches: [main]         # 修改網站檔案後自動發布
-  workflow_dispatch: {}      # 可在 Actions 頁面手動執行
+  workflow_dispatch:         # 可在 Actions 頁面手動執行，或由外部排程服務觸發
+    inputs:
+      mode:
+        description: "執行模式：full（完整更新）或 intraday（盤中取樣）"
+        required: false
+        default: full
+        type: choice
+        options: [full, intraday]
 
 # 預設不給任何權限，只在需要的工作中開放
 permissions: {}
@@ -37,7 +45,7 @@ jobs:
           node-version: "24"
       - name: 抓取資料
         env:
-          MODE: ${{ contains(github.event.schedule, '/') && '--intraday' || '' }}
+          MODE: ${{ (contains(github.event.schedule, '/') || inputs.mode == 'intraday') && '--intraday' || '' }}
           STOOQ_APIKEY: ${{ secrets.STOOQ_APIKEY }}  # 選用：未設定時自動略過
         run: node scripts/fetch-data.mjs $MODE
       - name: 提交更新
