@@ -44,8 +44,30 @@ const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15
 const errors = [];
 let budget = CFG.MAX_FETCH;
 
+// 盤中取樣與完整更新各自寫入不同檔案，兩者同時執行也不會互相覆蓋
+const INTRA_CACHE_PATH = "data/intraday-cache.json";
+const INTRA_OUT_PATH = "data/intraday.json";
 let cache = { f: {}, m: {} };
 try { cache = Object.assign(cache, JSON.parse(await fs.readFile(CACHE_PATH, "utf8"))); } catch {}
+function mergeCache(base, extra) {
+  if (!extra) return base;
+  const more = (a, b) => ((b && (b.points || b).length) > ((a && (a.points || a).length) || 0) ? b : a);
+  base.intra = base.intra || {};
+  for (const [d, v] of Object.entries(extra.intra || {})) base.intra[d] = more(base.intra[d], v);
+  base.fut = base.fut || {};
+  for (const [k, v] of Object.entries(extra.fut || {})) { const m = more(base.fut[k], v); base.fut[k] = m === v ? { ...v, updated: v.updated > ((base.fut[k] || {}).updated || "") ? v.updated : (base.fut[k] || {}).updated || v.updated } : m; }
+  base.cq = base.cq || {};
+  for (const [sym, e] of Object.entries(extra.cq || {})) {
+    const b = base.cq[sym] = base.cq[sym] || { daily: {}, intra: {} };
+    Object.assign(b.daily, e.daily || {});
+    b.prev = Object.assign(b.prev || {}, e.prev || {});
+    b.ohlc = Object.assign(b.ohlc || {}, e.ohlc || {});
+    b.intra = b.intra || {};
+    for (const [d, pts] of Object.entries(e.intra || {})) b.intra[d] = more(b.intra[d], pts);
+  }
+  return base;
+}
+try { mergeCache(cache, JSON.parse(await fs.readFile(INTRA_CACHE_PATH, "utf8"))); } catch {}
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const tpeToday = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
@@ -765,10 +787,11 @@ function futLive(kind) {
   return { start: k.split(":")[1], date: k.split(":")[1], points: e.points, prevClose: e.ref, src: "期交所即時行情（約每 10–15 分鐘取樣）", live: true, tz: "Asia/Taipei", overnight: kind === "night" };
 }
 
-/* ---------- 盤中模式：台股、日股、美股的今日走勢取樣 ---------- */
+/* ---------- 盤中模式：台股、台指期、日股、美股、外匯的今日走勢取樣 ---------- */
+// 只寫入 data/intraday.json 與 data/intraday-cache.json，網頁會把它疊加在完整資料上
 if (process.argv.includes("--intraday")) {
-  let latest = null, changed = 0;
-  try { latest = JSON.parse(await fs.readFile(OUT_PATH, "utf8")); } catch {}
+  let changed = 0;
+  const io = { at: new Date().toISOString(), errors: [] };
   // 台股（證交所即時行情）
   try {
     const p = await misIndexNow();
@@ -779,51 +802,37 @@ if (process.argv.includes("--intraday")) {
     day.points.sort((a, b) => (a.t < b.t ? -1 : 1));
     if (p.prevClose) day.prevClose = p.prevClose;
     cache.intra[p.date] = day;
-    if (latest && latest.tw) {
-      const cur = latest.tw.intraday;
-      if (!(cur && cur.date === p.date && cur.src === "臺灣證券交易所") && day.points.length > 1) {
-        latest.tw.intraday = { date: p.date, points: day.points, prevClose: day.prevClose, src: "臺灣證券交易所即時行情（約每 10 分鐘）", live: true };
-      }
-    }
     console.log(`台股盤中：${p.date} ${p.t} ${p.v}`);
-  } catch (e) { console.log("台股盤中取樣失敗：" + errText(e)); }
+  } catch (e) { io.errors.push("台股盤中取樣：" + errText(e)); }
+  const lastDay = Object.keys(cache.intra || {}).sort().at(-1);
+  if (lastDay && cache.intra[lastDay].points.length) {
+    const dd = cache.intra[lastDay];
+    io.tw = { intraday: { date: lastDay, points: dd.points, prevClose: dd.prevClose, src: "臺灣證券交易所即時行情（約每 10 分鐘）", live: true, tz: "Asia/Taipei" } };
+  }
   // 台指期（期交所即時行情）
   try {
     const f = await sampleFutures();
     if (f && f.added) changed++;
-    if (f && f.added && latest && latest.taifex) {
-      latest.taifex.liveDay = futLive("day");
-      latest.taifex.liveNight = futLive("night");
-    }
     console.log(f ? `台指期盤中：${f.session} ${f.t} ${f.last}` : "台指期：非交易時段");
-  } catch (e) { console.log("台指期盤中取樣失敗：" + errText(e)); }
-  // 美股與日經（CNBC）
+  } catch (e) { io.errors.push("台指期盤中取樣：" + errText(e)); }
+  io.taifex = { liveDay: futLive("day"), liveNight: futLive("night") };
+  // 美股、日經、外匯（CNBC）
   try {
     const qs = await cnbcQuotes(INTRA_SYMS);
-    const added = recordQuotes(qs);
-    changed += added;
-    if (latest && added) {
-      (latest.us || []).forEach(u => {
-        const q = qs[u.sym]; if (!q) return;
-        u.last = q.last; u.change = q.changePct; u.date = q.date; u.src = "CNBC";
-        u.bars = withQuote(u.bars || [], q);
-        const it = cnbcIntraday(u.sym); if (it) u.intraday = it;
-      });
-      latest.fxk = fxCandles(qs);
-      if (latest.jp && qs["^N225"]) {
-        const q = qs["^N225"], j = latest.jp;
-        j.index.last = q.last; j.index.change = q.changePct; j.index.date = q.date; j.src = "CNBC";
-        j.index.bars = withQuote(j.index.bars || [], q);
-        const it = cnbcIntraday("^N225"); if (it) j.intraday = it;
-      }
-    }
-    console.log("美日盤中：" + Object.keys(qs).join(", "));
-  } catch (e) { console.log("美日盤中取樣失敗：" + errText(e)); }
+    changed += recordQuotes(qs);
+    io.quotes = {};
+    for (const [sym, q] of Object.entries(qs)) io.quotes[sym] = { last: q.last, changePct: q.changePct, date: q.date, ts: q.ts, prevClose: q.prevClose };
+    io.fxk = fxCandles(qs);
+  } catch (e) { io.errors.push("美股、日股、外匯盤中取樣：" + errText(e)); }
+  io.intra = {};
+  for (const sym of INTRA_SYMS) { const it = cnbcIntraday(sym); if (it) io.intra[sym] = { ...it, tz: sym === "^N225" ? "Asia/Tokyo" : "America/New_York" }; }
   // 沒有新的取樣點（休市、排程延遲等）就不存檔，也就不會產生提交與網站發布
-  if (!changed) { console.log("沒有新的盤中資料，本次不存檔"); process.exit(0); }
-  if (latest) { latest.intradayAt = new Date().toISOString(); await fs.writeFile(OUT_PATH, JSON.stringify(latest)); }
-  await fs.writeFile(CACHE_PATH, JSON.stringify(cache));
+  if (!changed) { console.log("沒有新的盤中資料，本次不存檔"); io.errors.forEach(e => console.log(" - " + e)); process.exit(0); }
+  await fs.mkdir("data", { recursive: true });
+  await fs.writeFile(INTRA_OUT_PATH, JSON.stringify(io));
+  await fs.writeFile(INTRA_CACHE_PATH, JSON.stringify({ intra: cache.intra, fut: cache.fut, cq: cache.cq }));
   console.log(`新增 ${changed} 個盤中取樣點`);
+  io.errors.forEach(e => console.log(" - " + e));
   process.exit(0);
 }
 
@@ -846,7 +855,7 @@ process.on("unhandledRejection", emergencyWrite);
 let prevOut = null;
 try { prevOut = JSON.parse(await fs.readFile(OUT_PATH, "utf8")); } catch {}
 const out = {
-  version: "2026-11-09b",
+  version: "2026-11-10a",
   updatedAt: new Date().toISOString(), asOf: null,
   tw: null, taifex: null, twTop: null, foreign: [], margin: null, marginPeak: null,
   us: [], usTop: [], jp: null, jpTop: [], fx: null, news: { tw: [], us: [], jp: [], fx: [] }, signals: [],
