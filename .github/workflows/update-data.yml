@@ -25,8 +25,9 @@ on:
 # 預設不給任何權限，只在需要的工作中開放
 permissions: {}
 
+# 完整更新與盤中取樣分開排隊：盤中取樣不會擠掉等待中的完整更新
 concurrency:
-  group: update-data
+  group: update-${{ (contains(github.event.schedule, '/') || inputs.mode == 'intraday') && 'intraday' || github.event_name == 'push' && 'push' || 'full' }}
   cancel-in-progress: false
 
 jobs:
