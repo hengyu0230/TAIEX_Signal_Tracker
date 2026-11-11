@@ -247,7 +247,8 @@ async function misIndexNow() {
     const r0 = await fetch("https://mis.twse.com.tw/stock/index.jsp", { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(15000) });
     cookie = (r0.headers.getSetCookie ? r0.headers.getSetCookie() : []).map(c => c.split(";")[0]).join("; ");
   } catch {}
-  const j = await getJSON(`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw&json=1&delay=0&_=${Date.now()}`, 15000, cookie ? { Cookie: cookie, Referer: "https://mis.twse.com.tw/stock/index.jsp" } : {});
+  const j = await getJSON(`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw&json=1&delay=0&_=${Date.now()}`, 15000,
+    { Referer: "https://mis.twse.com.tw/stock/index.jsp", "Accept-Language": "zh-TW,zh;q=0.9", ...(cookie ? { Cookie: cookie } : {}) });
   const m = j && j.msgArray && j.msgArray[0];
   if (!m) throw new Error("即時行情無資料");
   const v = toNum(m.z), d = String(m.d || "");
@@ -630,10 +631,10 @@ async function fetchNews(cfg, region) {
 }
 
 /* ---------- CNBC 報價（非官方介面，不需金鑰；只取當下報價，走勢由本工具自行累積） ---------- */
-const CNBC_SYM = { "^GSPC": ".SPX", "^IXIC": ".IXIC", "^SOX": ".SOX", "^VIX": ".VIX", "^N225": ".N225", "TSM": "TSM", USDTWD: "TWD=", USDJPY: "JPY=", EURUSD: "EUR=", USDCNY: "CNY=" };
+const CNBC_SYM = { "^TWII": ".TWII", "^GSPC": ".SPX", "^IXIC": ".IXIC", "^SOX": ".SOX", "^VIX": ".VIX", "^N225": ".N225", "TSM": "TSM", USDTWD: "TWD=", USDJPY: "JPY=", EURUSD: "EUR=", USDCNY: "CNY=" };
 const FX_PAIRS = [["USDTWD", "美元兌新台幣", 3], ["USDJPY", "美元兌日圓", 3], ["EURUSD", "歐元兌美元", 5], ["USDCNY", "美元兌人民幣", 4]];
 const cnbcSym = s => CNBC_SYM[s] || (/\.T$/.test(s) ? s.replace(/\.T$/, "-JP") : s);
-const INTRA_SYMS = ["^GSPC", "^SOX", "^IXIC", "TSM", "^N225", "USDTWD", "USDJPY", "EURUSD", "USDCNY"];
+const INTRA_SYMS = ["^TWII", "^GSPC", "^SOX", "^IXIC", "TSM", "^N225", "USDTWD", "USDJPY", "EURUSD", "USDCNY"];
 function findQuotes(obj, out = []) {
   if (Array.isArray(obj)) obj.forEach(x => findQuotes(x, out));
   else if (obj && typeof obj === "object") {
@@ -804,11 +805,7 @@ if (process.argv.includes("--intraday")) {
     cache.intra[p.date] = day;
     console.log(`台股盤中：${p.date} ${p.t} ${p.v}`);
   } catch (e) { io.errors.push("台股盤中取樣：" + errText(e)); }
-  const lastDay = Object.keys(cache.intra || {}).sort().at(-1);
-  if (lastDay && cache.intra[lastDay].points.length) {
-    const dd = cache.intra[lastDay];
-    io.tw = { intraday: { date: lastDay, points: dd.points, prevClose: dd.prevClose, src: "臺灣證券交易所即時行情（約每 10 分鐘）", live: true, tz: "Asia/Taipei" } };
-  }
+
   // 台指期（期交所即時行情）
   try {
     const f = await sampleFutures();
@@ -825,7 +822,16 @@ if (process.argv.includes("--intraday")) {
     io.fxk = fxCandles(qs);
   } catch (e) { io.errors.push("美股、日股、外匯盤中取樣：" + errText(e)); }
   io.intra = {};
-  for (const sym of INTRA_SYMS) { const it = cnbcIntraday(sym); if (it) io.intra[sym] = { ...it, tz: sym === "^N225" ? "Asia/Tokyo" : "America/New_York" }; }
+  for (const sym of INTRA_SYMS) { if (sym === "^TWII") continue; const it = cnbcIntraday(sym); if (it) io.intra[sym] = { ...it, tz: sym === "^N225" ? "Asia/Tokyo" : "America/New_York" }; }
+  // 加權指數今日走勢：證交所即時行情與 CNBC 取樣中，取日期較新、點數較多的一份
+  {
+    const lastDay = Object.keys(cache.intra || {}).sort().at(-1);
+    const a = lastDay && cache.intra[lastDay].points.length ? { date: lastDay, points: cache.intra[lastDay].points, prevClose: cache.intra[lastDay].prevClose, src: "臺灣證券交易所即時行情（約每 10 分鐘）", live: true, tz: "Asia/Taipei" } : null;
+    const c = cnbcIntraday("^TWII");
+    const b = c ? { ...c, src: "CNBC（約每 10 分鐘取樣）", tz: "Asia/Taipei" } : null;
+    const pick = !a ? b : !b ? a : b.date > a.date || (b.date === a.date && b.points.length > a.points.length) ? b : a;
+    if (pick) io.tw = { intraday: pick };
+  }
   // 沒有新的取樣點（休市、排程延遲等）就不存檔，也就不會產生提交與網站發布
   if (!changed) { console.log("沒有新的盤中資料，本次不存檔"); io.errors.forEach(e => console.log(" - " + e)); process.exit(0); }
   await fs.mkdir("data", { recursive: true });
@@ -855,7 +861,7 @@ process.on("unhandledRejection", emergencyWrite);
 let prevOut = null;
 try { prevOut = JSON.parse(await fs.readFile(OUT_PATH, "utf8")); } catch {}
 const out = {
-  version: "2026-11-10a",
+  version: "2026-11-11a",
   updatedAt: new Date().toISOString(), asOf: null,
   tw: null, taifex: null, twTop: null, foreign: [], margin: null, marginPeak: null,
   us: [], usTop: [], jp: null, jpTop: [], fx: null, news: { tw: [], us: [], jp: [], fx: [] }, signals: [],
@@ -901,6 +907,7 @@ try {
     const { v: intra, src: isrc } = await firstOk("加權指數盤中", [
       ["臺灣證券交易所", () => twseIntraday(out.asOf)],
       ["Yahoo Finance", () => yahooIntraday("^TWII")],
+      ["CNBC 取樣", async () => { const x = cnbcIntraday("^TWII"); if (!x || x.date !== out.asOf) throw new Error("無當日取樣"); return { ...x, tz: "Asia/Taipei" }; }],
       ["臺灣證券交易所即時行情", async () => {
         const day = cache.intra && cache.intra[out.asOf];
         if (!day || day.points.length < 2) throw new Error("無盤中取樣資料");
